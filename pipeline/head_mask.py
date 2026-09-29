@@ -1,6 +1,6 @@
-"""head_mask.py - maska glowy (skora) z T1: prog Otsu, najwieksza skladowa, wypelnienie dziur.
-Uzycie: python head_mask.py --t1 orig.nii.gz --out head.nii.gz
-Docelowo zastapione maska z CT (kosc + skora), gdy CT jest dostepne."""
+"""head_mask.py - head (scalp) mask from T1: Otsu threshold, largest component, hole filling.
+Usage: python head_mask.py --t1 orig.nii.gz --out head.nii.gz
+To be replaced by a CT-based mask (bone + skin) when CT is available."""
 import argparse
 import numpy as np, nibabel as nib
 from scipy import ndimage

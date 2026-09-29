@@ -1,19 +1,20 @@
 """
-seeg_prep.py - automatyczny pipeline: badania pacjenta -> pakiet warstw mozgu do planowania SEEG.
+seeg_prep.py - build the patient brain package for SEEG planning from segmented layers.
 
-Uzycie:
-    python seeg_prep.py --seg aparc+aseg.nii.gz --head Head.nii.gz --out pacjent_725751
-    # opcjonalnie: --vessels naczynia_mask.nii.gz  (maska naczyn z MRA/CTA/T1+kontrast)
+Usage:
+    python seeg_prep.py --seg aparc.DKTatlas+aseg.deep.nii.gz --head head.nii.gz \
+        --brainmask mask.nii.gz --vessels vessels_auto.nii.gz \
+        --layer cst_L:tracts/cst_L.nii.gz:critical --out package/
 
-Docelowo krok --seg bedzie generowany automatycznie przez FastSurfer z surowego T1 (DICOM -> NIfTI).
-Wszystkie wspolrzedne wyjsciowe sa w milimetrach przestrzeni skanera (RAS), wiec punkty
-zaznaczone w okularach i obliczenia trajektorii dzialaja w tym samym ukladzie.
+The --seg input comes from FastSurfer run on the raw T1 (see run_pipeline.py).
+All output coordinates are in millimetres in scanner space (RAS), so points picked in the
+headset and computed trajectories use the same coordinate system.
 
-Wyjscie (folder --out):
-    meshes/<warstwa>.glb      siatki 3D do Unity / Quest
-    labels.nii.gz             pelna segmentacja (atlas Desikan-Killiany + struktury podkorowe)
-    dist_<struktura>.nii.gz   mapy odleglosci [mm] do struktur krytycznych (do oceny bezpieczenstwa)
-    manifest.json             lista warstw, kolory, nazwy obszarow, info o ukladzie wspolrzednych
+Output (folder --out):
+    meshes/<layer>.glb        3D meshes for Unity / Quest
+    labels.nii.gz             full segmentation (DKT atlas + subcortical structures)
+    dist_<structure>.nii.gz   distance maps [mm] to critical structures (for safety scoring)
+    manifest.json             layer list, colours, region centroids, coordinate-space info
 """
 import argparse, json, os
 import numpy as np
@@ -22,10 +23,10 @@ from scipy import ndimage
 from skimage import measure
 import trimesh
 
-# ---- definicje warstw (etykiety FreeSurfer aseg / aparc) ----
+# ---- layer definitions (FreeSurfer aseg / aparc labels) ----
 CORTEX = list(range(1000, 1036)) + list(range(2000, 2036)) + [3, 42]
 LAYERS = {
-    # nazwa: (etykiety, kolor RGBA, krytyczna_dla_trajektorii)
+    # name: (labels, RGBA colour, critical for trajectories)
     "white_matter":  ([2, 41, 77, 251, 252, 253, 254, 255, 85], [235, 230, 215, 255], False),
     "gray_matter":   (CORTEX,                                    [200, 140, 140, 110], False),
     "ventricles":    ([4, 5, 14, 15, 43, 44, 72],                [60, 140, 255, 220], True),
@@ -46,7 +47,7 @@ def mask_to_mesh(mask, affine, smooth_iter=15, target_faces=60000):
     m = np.pad(m, 1)
     verts, faces, _, _ = measure.marching_cubes(m, 0.5)
     verts -= 1
-    verts = nib.affines.apply_affine(affine, verts)          # voksele -> mm RAS
+    verts = nib.affines.apply_affine(affine, verts)          # voxels -> mm RAS
     mesh = trimesh.Trimesh(verts, faces, process=True)
     trimesh.smoothing.filter_taubin(mesh, iterations=smooth_iter)
     if len(mesh.faces) > target_faces:
@@ -58,13 +59,13 @@ def mask_to_mesh(mask, affine, smooth_iter=15, target_faces=60000):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seg", required=True, help="segmentacja aparc+aseg (NIfTI)")
-    ap.add_argument("--head", help="maska glowy/skory (NIfTI)")
-    ap.add_argument("--brainmask", help="maska mozgu (do przyblizenia CSF zewnatrzmozgowego)")
-    ap.add_argument("--vessels", help="maska naczyn (NIfTI) - z MRA/CTA/T1+Gd")
+    ap.add_argument("--seg", required=True, help="aparc+aseg segmentation (NIfTI)")
+    ap.add_argument("--head", help="head/scalp mask (NIfTI)")
+    ap.add_argument("--brainmask", help="brain mask (used to approximate extra-cerebral CSF)")
+    ap.add_argument("--vessels", help="vessel mask (NIfTI) - from MRA/CTA/contrast T1")
     ap.add_argument("--layer", action="append", default=[],
-                    help="dodatkowa warstwa na wlasnej siatce: nazwa:plik.nii.gz[:critical][:R,G,B] "
-                         "np. cst_L:tracts/cst_L.nii.gz:critical:255,80,80")
+                    help="extra layer on its own grid: name:file.nii.gz[:critical][:R,G,B] "
+                         "e.g. cst_L:tracts/cst_L.nii.gz:critical:255,80,80")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -79,28 +80,28 @@ def main():
                 "layers": [], "critical": []}
     masks = {k: (np.isin(seg, v[0]), aff, vox) for k, v in LAYERS.items()}
 
-    # KORA ELOKWENTNA (wersja z atlasu DKT; docelowo zastapiona/uzupelniona fMRI)
-    # Jezyk: zakladamy lewostronna dominacje (~95% praworecznych) - do potwierdzenia klinicznie.
+    # ELOQUENT CORTEX (atlas-based from DKT labels; to be replaced/complemented by fMRI)
+    # Language: left-hemisphere dominance assumed (~95% of right-handers) - must be confirmed clinically.
     ELO = {
-        "eloquent_motor":    ([1024, 2024], [255, 60, 60, 200]),    # zakret przedsrodkowy
-        "eloquent_sensory":  ([1022, 2022], [255, 150, 60, 200]),   # zakret zasrodkowy
-        "eloquent_visual":   ([1021, 2021], [80, 200, 255, 200]),   # kora okolicy bruzdy ostrogowej (V1)
-        "eloquent_auditory": ([1034, 2034], [200, 120, 255, 200]),  # zakret skroniowy poprzeczny (Heschla)
+        "eloquent_motor":    ([1024, 2024], [255, 60, 60, 200]),    # precentral gyrus
+        "eloquent_sensory":  ([1022, 2022], [255, 150, 60, 200]),   # postcentral gyrus
+        "eloquent_visual":   ([1021, 2021], [80, 200, 255, 200]),   # pericalcarine cortex (V1)
+        "eloquent_auditory": ([1034, 2034], [200, 120, 255, 200]),  # transverse temporal gyrus (Heschl)
     }
     for k, (labs, rgba) in ELO.items():
         masks[k] = (np.isin(seg, labs), aff, vox); LAYERS[k] = (labs, rgba, False)
     broca = np.isin(seg, [1018, 1020])                                  # pars opercularis + triangularis (L)
-    stg = seg == 1030                                                   # zakret skroniowy gorny (L)
-    if stg.any():                                                       # tylna polowa STG ~ okolica Wernickego
+    stg = seg == 1030                                                   # superior temporal gyrus (L)
+    if stg.any():                                                       # posterior half of STG ~ Wernicke area
         ys = nib.affines.apply_affine(aff, np.argwhere(stg))[:, 1]
         post = np.zeros_like(stg); idx = np.argwhere(stg)[ys < np.median(ys)]
         post[tuple(idx.T)] = True; stg = post
-    lang = broca | stg | (seg == 1031)                                  # + zakret nadbrzezny (L)
+    lang = broca | stg | (seg == 1031)                                  # + supramarginal gyrus (L)
     masks["eloquent_language"] = (lang, aff, vox); LAYERS["eloquent_language"] = ([], [255, 230, 60, 200], False)
     elo_all = lang.copy()
     for k in ELO: elo_all |= masks[k][0]
 
-    # CSF: 3. komora/CSF z aseg + przestrzen miedzy mozgiem a maska mozgu (bruzdy, przestrzen podpajeczynowkowa)
+    # CSF: CSF label from aseg + space between brain and brain mask (sulci, subarachnoid space)
     csf = np.isin(seg, CSF_LABELS)
     if a.brainmask:
         bm = np.asanyarray(nib.load(a.brainmask).dataobj) > 0
@@ -115,7 +116,7 @@ def main():
         LAYERS["scalp"] = ([], [230, 190, 170, 60], False)
 
     if a.vessels:
-        # naczynia moga miec wlasna, drobniejsza siatke (np. MRA 0.47 mm) - zostawiamy natywna rozdzielczosc
+        # vessels may have their own, finer grid (e.g. MRA 0.47 mm) - keep native resolution
         vimg = nib.load(a.vessels)
         masks["vessels"] = (np.asanyarray(vimg.dataobj) > 0, vimg.affine, vimg.header.get_zooms()[:3])
         LAYERS["vessels"] = ([], [220, 30, 30, 255], True)
@@ -135,7 +136,7 @@ def main():
         mesh = mask_to_mesh(mask, m_aff, smooth_iter=5 if name in ("vessels", "veins") else 15,
                             target_faces=150000 if name == "vessels" else 60000)
         if mesh is None:
-            print(f"  [!] {name}: pusta maska, pomijam"); continue
+            print(f"  [!] {name}: empty mask, skipping"); continue
         rgba = LAYERS[name][1]
         mesh.visual.face_colors = rgba
         path = os.path.join("meshes", f"{name}.glb")
@@ -143,16 +144,16 @@ def main():
         manifest["layers"].append({"name": name, "file": path, "rgba": rgba,
                                    "faces": int(len(mesh.faces)),
                                    "volume_ml": round(float(mask.sum() * np.prod(m_vox)) / 1000, 2)})
-        print(f"  {name:14s} {len(mesh.faces):7d} trojkatow  {manifest['layers'][-1]['volume_ml']} ml")
+        print(f"  {name:18s} {len(mesh.faces):7d} faces  {manifest['layers'][-1]['volume_ml']} ml")
 
-        # mapa odleglosci [mm] dla struktur krytycznych
+        # distance map [mm] for critical structures
         if LAYERS[name][2]:
             d = ndimage.distance_transform_edt(~mask, sampling=m_vox).astype(np.float32)
-            if m_aff is not aff:   # inna siatka -> przepróbkuj mape odleglosci na siatke segmentacji
+            if m_aff is not aff:   # different grid -> resample the distance map onto the segmentation grid
                 ijk = np.indices(seg.shape).reshape(3, -1).T
                 src = nib.affines.apply_affine(np.linalg.inv(m_aff) @ aff, ijk).T
                 d = ndimage.map_coordinates(d, src, order=1, mode="constant", cval=np.nan).reshape(seg.shape).astype(np.float32)
-                manifest.setdefault("notes", []).append(f"{name}: mapa odleglosci NaN poza polem widzenia badania")
+                manifest.setdefault("notes", []).append(f"{name}: distance map is NaN outside the exam's field of view")
             fn = f"dist_{name}.nii.gz"
             nib.save(nib.Nifti1Image(d, aff), os.path.join(a.out, fn))
             manifest["critical"].append({"name": name, "distance_map": fn})
@@ -163,10 +164,10 @@ def main():
                                  "note": "atlas-based (DKT); language assumed left-dominant"})
 
     if not a.vessels:
-        manifest["warnings"] = ["BRAK MASKI NACZYN - trajektorie nie moga byc uznane za bezpieczne "
-                                "bez MRA/CTA/T1 z kontrastem."]
+        manifest["warnings"] = ["NO VESSEL MASK - trajectories cannot be considered safe "
+                                "without MRA/CTA/contrast T1."]
 
-    # regiony atlasu dostepne do wyboru celow "po nazwie" (srodek ciezkosci w mm)
+    # atlas regions available for picking targets "by name" (centre of mass in mm)
     regions = {}
     for l in np.unique(seg):
         if l == 0: continue
@@ -176,7 +177,7 @@ def main():
 
     with open(os.path.join(a.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)
-    print("Gotowe ->", a.out)
+    print("Done ->", a.out)
 
 if __name__ == "__main__":
     main()

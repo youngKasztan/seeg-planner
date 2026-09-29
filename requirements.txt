@@ -1,0 +1,10 @@
+numpy
+scipy
+nibabel
+scikit-image
+trimesh
+fast_simplification
+SimpleITK
+pyvista
+# FastSurfer (segmentacja) instalowany osobno: https://github.com/Deep-MI/FastSurfer
+# + torch, torchvision (CPU lub CUDA) i wagi aparc_vinn_*_v2.0.0.pkl w FastSurfer/checkpoints/

@@ -1,0 +1,11 @@
+# dane pacjentow NIGDY do repozytorium
+*.nii
+*.nii.gz
+*.mgz
+*.dcm
+data/
+wyniki/
+results/
+*.glb
+__pycache__/
+*.pyc

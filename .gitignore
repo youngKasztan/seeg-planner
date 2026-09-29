@@ -1,11 +1,12 @@
-# dane pacjentow NIGDY do repozytorium
+# NEVER commit patient data
 *.nii
 *.nii.gz
 *.mgz
 *.dcm
 data/
-wyniki/
 results/
+wyniki/
 *.glb
+*.trk
 __pycache__/
 *.pyc

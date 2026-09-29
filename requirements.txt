@@ -7,5 +7,5 @@ fast_simplification
 SimpleITK
 pyvista
 dipy
-# FastSurfer (segmentacja) instalowany osobno: https://github.com/Deep-MI/FastSurfer
-# + torch, torchvision (CPU lub CUDA) i wagi aparc_vinn_*_v2.0.0.pkl w FastSurfer/checkpoints/
+# FastSurfer (segmentation) is installed separately: https://github.com/Deep-MI/FastSurfer
+# + torch, torchvision (CPU or CUDA) and weights aparc_vinn_*_v2.0.0.pkl in FastSurfer/checkpoints/

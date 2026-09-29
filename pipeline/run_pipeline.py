@@ -28,6 +28,9 @@ def mgz_to_nii(src, dst):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--t1", required=True); ap.add_argument("--mra"); ap.add_argument("--truth")
+    ap.add_argument("--dti_dir", help="folder z wolumenami DTI (*DTI-*.nii.gz)"); ap.add_argument("--bvals"); ap.add_argument("--bvecs")
+    ap.add_argument("--t1_gd", help="T1 po kontrascie -> zyly i zatoki"); ap.add_argument("--ct", help="CT -> kosc, skora")
+    ap.add_argument("--ct_postimplant", action="store_true", help="CT po implantacji -> kontakty elektrod")
     ap.add_argument("--out", required=True); ap.add_argument("--fastsurfer", required=True)
     ap.add_argument("--device", default="cpu"); ap.add_argument("--threads", default="2")
     a = ap.parse_args()
@@ -59,12 +62,38 @@ def main():
         if a.truth: cmd += ["--truth", a.truth]
         run(cmd)
 
+    extra = []
+    # 3b. drogi istoty bialej
+    if a.dti_dir:
+        tdir = os.path.join(out, "tracts")
+        if not os.path.exists(os.path.join(tdir, "tracts_report.json")):
+            run([sys.executable, os.path.join(HERE, "tracts_dti.py"), "--dti_dir", a.dti_dir, "--bvals", a.bvals,
+                 "--bvecs", a.bvecs, "--t1", os.path.join(out, "orig.nii.gz"), "--seg", seg, "--out", tdir])
+        for f in sorted(os.listdir(tdir)):
+            if f.endswith(".nii.gz") and not f.startswith("fa_"):
+                extra += ["--layer", f"{f[:-7]}:{os.path.join(tdir, f)}:critical"]
+    # 3c. zyly i zatoki
+    if a.t1_gd:
+        vdir = os.path.join(out, "veins")
+        cmd = [sys.executable, os.path.join(HERE, "veins_ct1.py"), "--pre", os.path.join(out, "orig.nii.gz"),
+               "--post", a.t1_gd, "--seg", seg, "--out", vdir]
+        if os.path.exists(vessels): cmd += ["--arteries", vessels]
+        run(cmd)
+        extra += ["--layer", f"veins:{vdir}/veins.nii.gz:critical", "--layer", f"sinuses:{vdir}/sinuses.nii.gz:critical"]
+    # 3d. CT
+    if a.ct:
+        cdir = os.path.join(out, "ct")
+        cmd = [sys.executable, os.path.join(HERE, "ct_layers.py"), "--ct", a.ct, "--t1", os.path.join(out, "orig.nii.gz"), "--out", cdir]
+        if a.ct_postimplant: cmd.append("--postimplant")
+        run(cmd)
+        extra += ["--layer", f"skull:{cdir}/skull.nii.gz"]
+
     # 4. pakiet
     pkg = os.path.join(out, "package")
     cmd = [sys.executable, os.path.join(HERE, "seeg_prep.py"), "--seg", seg, "--head", head,
            "--brainmask", os.path.join(out, "mask.nii.gz"), "--out", pkg]
     if os.path.exists(vessels): cmd += ["--vessels", vessels]
-    run(cmd)
+    run(cmd + extra)
 
     # 5. podglad
     run([sys.executable, os.path.join(ROOT, "tools", "render_preview.py"), "--package", pkg, "--out", os.path.join(out, "preview.png")])

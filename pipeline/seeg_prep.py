@@ -62,6 +62,9 @@ def main():
     ap.add_argument("--head", help="maska glowy/skory (NIfTI)")
     ap.add_argument("--brainmask", help="maska mozgu (do przyblizenia CSF zewnatrzmozgowego)")
     ap.add_argument("--vessels", help="maska naczyn (NIfTI) - z MRA/CTA/T1+Gd")
+    ap.add_argument("--layer", action="append", default=[],
+                    help="dodatkowa warstwa na wlasnej siatce: nazwa:plik.nii.gz[:critical][:R,G,B] "
+                         "np. cst_L:tracts/cst_L.nii.gz:critical:255,80,80")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -75,6 +78,27 @@ def main():
     manifest = {"space": "scanner RAS, mm", "voxel_mm": [float(v) for v in vox],
                 "layers": [], "critical": []}
     masks = {k: (np.isin(seg, v[0]), aff, vox) for k, v in LAYERS.items()}
+
+    # KORA ELOKWENTNA (wersja z atlasu DKT; docelowo zastapiona/uzupelniona fMRI)
+    # Jezyk: zakladamy lewostronna dominacje (~95% praworecznych) - do potwierdzenia klinicznie.
+    ELO = {
+        "eloquent_motor":    ([1024, 2024], [255, 60, 60, 200]),    # zakret przedsrodkowy
+        "eloquent_sensory":  ([1022, 2022], [255, 150, 60, 200]),   # zakret zasrodkowy
+        "eloquent_visual":   ([1021, 2021], [80, 200, 255, 200]),   # kora okolicy bruzdy ostrogowej (V1)
+        "eloquent_auditory": ([1034, 2034], [200, 120, 255, 200]),  # zakret skroniowy poprzeczny (Heschla)
+    }
+    for k, (labs, rgba) in ELO.items():
+        masks[k] = (np.isin(seg, labs), aff, vox); LAYERS[k] = (labs, rgba, False)
+    broca = np.isin(seg, [1018, 1020])                                  # pars opercularis + triangularis (L)
+    stg = seg == 1030                                                   # zakret skroniowy gorny (L)
+    if stg.any():                                                       # tylna polowa STG ~ okolica Wernickego
+        ys = nib.affines.apply_affine(aff, np.argwhere(stg))[:, 1]
+        post = np.zeros_like(stg); idx = np.argwhere(stg)[ys < np.median(ys)]
+        post[tuple(idx.T)] = True; stg = post
+    lang = broca | stg | (seg == 1031)                                  # + zakret nadbrzezny (L)
+    masks["eloquent_language"] = (lang, aff, vox); LAYERS["eloquent_language"] = ([], [255, 230, 60, 200], False)
+    elo_all = lang.copy()
+    for k in ELO: elo_all |= masks[k][0]
 
     # CSF: 3. komora/CSF z aseg + przestrzen miedzy mozgiem a maska mozgu (bruzdy, przestrzen podpajeczynowkowa)
     csf = np.isin(seg, CSF_LABELS)
@@ -96,8 +120,19 @@ def main():
         masks["vessels"] = (np.asanyarray(vimg.dataobj) > 0, vimg.affine, vimg.header.get_zooms()[:3])
         LAYERS["vessels"] = ([], [220, 30, 30, 255], True)
 
+    DEFAULT_COL = {"cst": [255, 80, 80], "arcuate": [255, 220, 60], "optic": [80, 200, 255],
+                   "vein": [60, 90, 255], "sinus": [30, 40, 200], "skull": [240, 235, 220], "scalp": [230, 190, 170]}
+    for spec in a.layer:
+        parts = spec.split(":"); name, path = parts[0], parts[1]
+        crit = "critical" in parts[2:]
+        rgb = next((list(map(int, p.split(","))) for p in parts[2:] if "," in p),
+                   next((c for k, c in DEFAULT_COL.items() if k in name), [200, 200, 200]))
+        im = nib.load(path)
+        masks[name] = (np.asanyarray(im.dataobj) > 0, im.affine, im.header.get_zooms()[:3])
+        LAYERS[name] = ([], rgb + [255], crit)
+
     for name, (mask, m_aff, m_vox) in masks.items():
-        mesh = mask_to_mesh(mask, m_aff, smooth_iter=5 if name in ("vessels",) else 15,
+        mesh = mask_to_mesh(mask, m_aff, smooth_iter=5 if name in ("vessels", "veins") else 15,
                             target_faces=150000 if name == "vessels" else 60000)
         if mesh is None:
             print(f"  [!] {name}: pusta maska, pomijam"); continue
@@ -121,6 +156,11 @@ def main():
             fn = f"dist_{name}.nii.gz"
             nib.save(nib.Nifti1Image(d, aff), os.path.join(a.out, fn))
             manifest["critical"].append({"name": name, "distance_map": fn})
+
+    d = ndimage.distance_transform_edt(~elo_all, sampling=vox).astype(np.float32)
+    nib.save(nib.Nifti1Image(d, aff), os.path.join(a.out, "dist_eloquent.nii.gz"))
+    manifest["critical"].append({"name": "eloquent", "distance_map": "dist_eloquent.nii.gz",
+                                 "note": "atlas-based (DKT); language assumed left-dominant"})
 
     if not a.vessels:
         manifest["warnings"] = ["BRAK MASKI NACZYN - trajektorie nie moga byc uznane za bezpieczne "

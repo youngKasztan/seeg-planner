@@ -1,16 +1,16 @@
 """
-render_preview.py - podglad PNG pakietu pacjenta (bez okularow): 6 widokow modelu 3D.
+render_preview.py - PNG preview of a patient package (no headset needed): 6 views of the 3D model.
 
-Rzad 1: anatomia
-  1. caly mozg (kora nieprzezroczysta) + tetnice
-  2. kora przezroczysta: komory, hipokamp, migdalowate, wzgorze, jadra, pien, tetnice
-  3. to samo z gory
-Rzad 2: warstwy funkcjonalne (to, czego trajektoria ma unikac poza naczyniami)
-  4. kora elokwentna na mozgu (ruch, czucie, wzrok, sluch, mowa) - z boku, lewa polkula
-  5. drogi istoty bialej w przezroczystym mozgu - z boku
-  6. drogi istoty bialej - z gory
+Row 1: anatomy
+  1. whole brain (opaque cortex) + arteries
+  2. transparent cortex: ventricles, hippocampus, amygdala, thalamus, basal ganglia, brainstem, arteries
+  3. the same from above
+Row 2: functional layers (what trajectories must avoid besides vessels)
+  4. eloquent cortex on the brain (motor, sensory, visual, auditory, language) - left lateral view
+  5. white-matter tracts in a transparent brain - lateral view
+  6. white-matter tracts - from above
 
-Uzycie: python tools/render_preview.py --package wyniki/IXI057/package --out preview.png
+Usage: python tools/render_preview.py --package results/IXI057/package --out preview.png
 """
 import argparse, json, os
 import numpy as np
@@ -54,26 +54,26 @@ def main():
     def cam(view, title, left=False):
         p.add_text(title, font_size=11, color="white")
         getattr(p, f"view_{view}")()
-        if view == "yz": p.camera.azimuth = 180          # widok od lewej strony pacjenta
+        if view == "yz": p.camera.azimuth = 180          # view from the patient's left side
         p.camera.zoom(1.35)
 
     for i, (title, op, view, names) in enumerate([
-            ("Caly mozg (z tylu) + tetnice", 1.0, "xz", ["vessels"]),
-            ("Kora przezroczysta: struktury glebokie", 0.12, "yz", deep),
-            ("Widok z gory", 0.12, "xy", deep)]):
+            ("Whole brain (posterior view) + arteries", 1.0, "xz", ["vessels"]),
+            ("Transparent cortex: deep structures", 0.12, "yz", deep),
+            ("Top view", 0.12, "xy", deep)]):
         p.subplot(0, i); p.set_background("black"); cortex(op); add(names); cam(view, title)
 
     if two_rows:
         p.subplot(1, 0); p.set_background("black")
         if meshes.get("gray_matter") is not None:
             p.add_mesh(meshes["gray_matter"], color=[0.55, 0.5, 0.5], smooth_shading=True)
-        add(elo); cam("yz", "Kora elokwentna (atlas): ruch, czucie, wzrok, sluch, mowa", left=True)
+        add(elo); cam("yz", "Eloquent cortex (atlas): motor, sensory, visual, auditory, language", left=True)
         p.subplot(1, 1); p.set_background("black"); cortex(0.08); add(tracts + ["ventricles"])
-        cam("yz", "Drogi istoty bialej: korowo-rdzeniowa, lukowata, wzrokowa", left=True)
+        cam("yz", "White-matter tracts: corticospinal, arcuate, optic radiation", left=True)
         p.subplot(1, 2); p.set_background("black"); cortex(0.08); add(tracts + ["ventricles"])
-        cam("xy", "Drogi istoty bialej - z gory")
+        cam("xy", "White-matter tracts - top view")
     p.screenshot(a.out)
-    print("podglad ->", a.out)
+    print("preview ->", a.out)
 
 if __name__ == "__main__":
     main()

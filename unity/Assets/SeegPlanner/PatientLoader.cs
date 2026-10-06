@@ -1,7 +1,7 @@
 // PatientLoader.cs - loads the patient package exported by tools/export_headset.py
 // (patient_scene.glb + headset_manifest.json) and sets layer visibility/opacity.
 // Requires packages: com.unity.cloud.gltfast, com.unity.nuget.newtonsoft-json.
-// STATUS: written against the glTFast 6.x API, not yet compiled in a Unity project.
+// STATUS: written against the glTFast 6.x API; desktop test via DesktopViewer.cs (no headset needed).
 using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
@@ -20,13 +20,16 @@ namespace SeegPlanner
         public Transform PatientRoot { get; private set; }          // move this to align the brain with the head
         public JObject Manifest { get; private set; }
         public readonly Dictionary<string, GameObject> Layers = new();
+        public bool IsLoaded { get; private set; }
 
         async void Start() { await Load(); }
 
         public async Task Load()
         {
             string dir = string.IsNullOrEmpty(packageFolder) ? Path.Combine(Application.persistentDataPath, "patient") : packageFolder;
-            Manifest = JObject.Parse(File.ReadAllText(Path.Combine(dir, "headset_manifest.json")));
+            string manifestPath = Path.Combine(dir, "headset_manifest.json");
+            if (!File.Exists(manifestPath)) { Debug.LogError("headset_manifest.json not found in " + dir + " - set 'Package Folder' on PatientLoader"); return; }
+            Manifest = JObject.Parse(File.ReadAllText(manifestPath));
 
             PatientRoot = new GameObject("PatientRoot").transform;
             PatientRoot.SetParent(transform, false);
@@ -35,7 +38,7 @@ namespace SeegPlanner
 
             var gltf = new GltfImport();
             string file = Path.Combine(dir, useLiteScene ? "patient_scene_lite.glb" : "patient_scene.glb");
-            if (!await gltf.Load("file://" + file)) { Debug.LogError("Could not load " + file); return; }
+            if (!await gltf.Load(new System.Uri(file).AbsoluteUri)) { Debug.LogError("Could not load " + file); return; }
             await gltf.InstantiateMainSceneAsync(PatientRoot);
 
             foreach (Transform t in PatientRoot.GetComponentsInChildren<Transform>(true))
@@ -46,7 +49,8 @@ namespace SeegPlanner
                 string name = (string)layer["name"];
                 SetLayerVisible(name, (bool)layer["visible"]);
             }
-            Debug.Log($"Patient loaded: {Layers.Count} nodes");
+            IsLoaded = true;
+            Debug.Log($"Patient loaded: {Layers.Count} nodes from {dir}");
         }
 
         public void SetLayerVisible(string name, bool visible)
@@ -59,5 +63,8 @@ namespace SeegPlanner
             new Vector3(-(float)xyz[0], (float)xyz[1], (float)xyz[2]);
 
         public Vector3 LandmarkLocal(string name) => SceneToUnityLocal(Manifest["landmarks"][name]["scene_m"]);
+
+        /// Centre of an atlas region (FreeSurfer label, e.g. 17 = left hippocampus) in PatientRoot local space.
+        public Vector3 RegionLocal(int label) => SceneToUnityLocal(Manifest["region_centroids_scene_m"][label.ToString()]);
     }
 }

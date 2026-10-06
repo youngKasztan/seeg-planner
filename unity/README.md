@@ -20,6 +20,9 @@ Not yet run inside Unity / on a headset.
    The panel switches layers (origin shown as [PRIOR] / [ESTIMATE]), shows the 5 landmarks, and
    **Simulate registration** places a virtual head at a random pose, "touches" the landmarks with ~2 mm noise
    and reports FRE + target error at the hippocampus - the same code path the headset uses.
+   **Edit landmarks**: choose a landmark, click on the skin to move it; it is saved to `headset_manifest.json`.
+6. Electrode plan: run `planner/plan_seeg.py` (writes `plan.json` into the same folder), add the component
+   `PlanViewer` to `Patient` and drag `Patient` into its Loader field. The plan appears in a panel on the right.
 
 
 ## Headset setup (Quest 3)
@@ -31,14 +34,14 @@ Not yet run inside Unity / on a headset.
    Bind the controller trigger to `LandmarkRegistration.Capture()`.
 
 ## Getting the patient onto the headset
-Export with `python tools/export_headset.py --package <package> --head head.nii.gz --out headset/`, then copy the folder to the Quest:
+Export with `python tools/export_headset.py --package <package> --head head.nii.gz --t1 orig.nii.gz --out headset/`, then copy the folder to the Quest:
 ```
 adb push headset/. /sdcard/Android/data/<your.app.id>/files/patient/
 ```
 (`PatientLoader` reads `Application.persistentDataPath/patient` by default.)
 
 ## Registration (brain inside the head)
-Touch, in order: nose tip, nasion, left pre-auricular point, right pre-auricular point, vertex.
+Touch the landmarks in the order given by `touch_order` in `headset_manifest.json`: nose tip, nasion, right inner and outer eye corner, right tragus, left inner and outer eye corner, left tragus (eyes closed).
 After 3+ points the hologram snaps onto the head; the fiducial registration error (FRE, mm) is logged.
 Landmark positions are auto-estimated by the exporter - check them on the model first.
 Same maths as `tools/registration.py` (self-test: `python tools/registration.py`).

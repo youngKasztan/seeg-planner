@@ -7,5 +7,6 @@ fast_simplification
 SimpleITK
 pyvista
 dipy
+nilearn            # MNI152 template for atlas priors (bundled, no download)
 # FastSurfer (segmentation) is installed separately: https://github.com/Deep-MI/FastSurfer
 # + torch, torchvision (CPU or CUDA) and weights aparc_vinn_*_v2.0.0.pkl in FastSurfer/checkpoints/

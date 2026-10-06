@@ -12,13 +12,14 @@ namespace SeegPlanner
     {
         public PatientLoader loader;
         public Transform pointerTip;                       // controller tip transform (world space)
-        public string[] landmarkOrder = { "nose_tip", "nasion", "left_preauricular", "right_preauricular", "vertex" };
+        // The touch order comes from headset_manifest.json ("touch_order"), so it always matches the exported landmarks.
+        public List<string> Order => loader != null && loader.IsLoaded ? loader.TouchOrder() : new List<string>();
 
         readonly List<Vector3> modelPts = new();            // landmarks in PatientRoot local space
         readonly List<Vector3> worldPts = new();            // touched positions in world space
         public float LastFreMm { get; private set; }
 
-        public string NextLandmark => modelPts.Count < landmarkOrder.Length ? landmarkOrder[modelPts.Count] : null;
+        public string NextLandmark { get { var o = Order; return modelPts.Count < o.Count ? o[modelPts.Count] : null; } }
 
         /// Call when the trigger is pressed with the controller tip on the current landmark.
         public void Capture() { if (pointerTip != null) CaptureWorld(pointerTip.position); }

@@ -42,9 +42,17 @@ ORIGIN = {"veins_prior": "prior: VENAT population atlas registered to patient (n
           "sulci": "patient (derived from segmentation)",
           "eloquent": "patient anatomy + atlas-based function (no fMRI)"}
 
-HINT = {"nose_tip": "tip of the nose", "nasion": "deepest point between the eyes, at the top of the nose bridge",
-        "left_preauricular": "left ear: touch the tragus (small flap in front of the ear canal)",
-        "right_preauricular": "right ear: touch the tragus", "vertex": "highest point of the head"}
+# Landmarks chosen to be easy to find again on the real patient (no hair, clear skin features).
+TOUCH_ORDER = ["nose_tip", "nasion", "right_inner_eye_corner", "right_outer_eye_corner", "right_tragus",
+               "left_inner_eye_corner", "left_outer_eye_corner", "left_tragus"]
+HINT = {"nose_tip": "tip of the nose",
+        "nasion": "deepest point of the nose bridge, between the eyes",
+        "right_inner_eye_corner": "right eye: inner corner (next to the nose), eye closed",
+        "right_outer_eye_corner": "right eye: outer corner, eye closed",
+        "left_inner_eye_corner": "left eye: inner corner (next to the nose), eye closed",
+        "left_outer_eye_corner": "left eye: outer corner, eye closed",
+        "right_tragus": "right ear: the small flap in front of the ear canal",
+        "left_tragus": "left ear: the small flap in front of the ear canal"}
 
 def meta(name):
     for k, v in CATEGORY.items():
@@ -73,7 +81,31 @@ def head_frame(seg, aff):
     si = np.cross(lr, ap)
     return cen(list(range(1000, 1036)) + list(range(2000, 2036))), np.stack([lr, ap, si])
 
-def landmarks(scalp, seg, aff, head=None, head_aff=None, head_vox=(1, 1, 1)):
+def eye_centres(t1_img, head, head_aff, c, F, qa):
+    """Eyeball centres (anatomical frame) from T1: the vitreous is a dark-grey ball (darker than tissue,
+    brighter than air in the sinuses) surrounded by bright orbital fat."""
+    T = np.asanyarray(t1_img.dataobj).astype(np.float32)
+    ijk = np.argwhere(head)
+    q = (nib.affines.apply_affine(t1_img.affine, ijk) - c) @ F.T
+    reg = (np.abs(q[:, 0]) > 18) & (np.abs(q[:, 0]) < 55) & (q[:, 1] < qa[1] - 8) & (q[:, 1] > qa[1] - 55) & \
+          (q[:, 2] > qa[2] - 20) & (q[:, 2] < qa[2] + 30)
+    sel, qs = ijk[reg], q[reg]
+    wm = np.median(T[head & (T > np.percentile(T[head], 60))])          # bright tissue reference
+    val = T[tuple(sel.T)]
+    m = np.zeros(T.shape, bool); m[tuple(sel[(val > 0.11 * wm) & (val < 0.40 * wm)].T)] = True
+    d = ndimage.distance_transform_edt(m, sampling=t1_img.header.get_zooms()[:3]); lab, _ = ndimage.label(m)
+    eyes = {}
+    for side, sg in (("right", 1), ("left", -1)):
+        ss = sel[sg * qs[:, 0] > 0]
+        if not len(ss): continue
+        i = ss[np.argmax(d[tuple(ss.T)])]
+        if d[tuple(i)] < 4: continue                                    # no ball found
+        comp = (nib.affines.apply_affine(t1_img.affine, np.argwhere(lab == lab[tuple(i)])) - c) @ F.T
+        p0 = (nib.affines.apply_affine(t1_img.affine, i) - c) @ F.T
+        eyes[side] = comp[np.linalg.norm(comp - p0, axis=1) < 13].mean(0)
+    return eyes
+
+def landmarks(scalp, seg, aff, head=None, head_aff=None, head_vox=(1, 1, 1), t1_img=None):
     """Auto-estimated fiducials on the scalp (RAS mm), found in the head's own anatomical frame.
     Must be verified by the user in the app."""
     c, F = head_frame(seg, aff)
@@ -95,6 +127,21 @@ def landmarks(scalp, seg, aff, head=None, head_aff=None, head_vox=(1, 1, 1)):
     at = lambda i: pick((np.abs(q[:, 0]) < 12) & (np.abs(q[:, 2] - zs[i]) < 0.75), lambda Q: np.argmax(Q[:, 1]))
     nose, nasion = at(i_tip), at(i_nas)
     qa = (nasion - c) @ F.T
+    eyes = eye_centres(t1_img, head, head_aff, c, F, qa) if (t1_img is not None and head is not None) else {}
+    if len(eyes) == 2:
+        # with the eyes known, the nasion is the deepest midline point from eye level to 20 mm above it
+        ez = np.mean([e[2] for e in eyes.values()])
+        win = (zs > ez - 2) & (zs < ez + 20) & ~np.isnan(prof)
+        if win.any(): nasion = at(int(np.argmin(np.where(win, prof, np.inf)))); qa = (nasion - c) @ F.T
+    def skin(lr, si):                                     # skin point at a given (left-right, height)
+        m = (np.abs(q[:, 0] - lr) < 1.5) & (np.abs(q[:, 2] - si) < 1.5) & (q[:, 1] > 0)
+        return v[m][np.argmax(q[m, 1])] if m.any() else None
+    corners = {}
+    for side, sg in (("right", 1), ("left", -1)):
+        if side in eyes:                                  # typical eye: inner corner 16 mm, outer 13 mm from the centre
+            e = eyes[side]
+            corners[f"{side}_inner_eye_corner"] = skin(e[0] - sg * 16, e[2])
+            corners[f"{side}_outer_eye_corner"] = skin(e[0] + sg * 13, e[2] + 2)
     # ears: the pinna is thin, so it disappears when the head mask is opened with a 5 mm ball;
     # the tragus is estimated at the front edge of the pinna, at its mid-height, snapped to the skin
     lpa = rpa = None
@@ -111,8 +158,8 @@ def landmarks(scalp, seg, aff, head=None, head_aff=None, head_vox=(1, 1, 1)):
             side = sign * q[:, 0] > 0
             return v[side][np.argmin(np.linalg.norm(q[side] - t, axis=1))]
         lpa, rpa = tragus(-1), tragus(+1)
-    vertex = pick(np.ones(len(v), bool), lambda Q: np.argmax(Q[:, 2]))
-    return {"nose_tip": nose, "nasion": nasion, "left_preauricular": lpa, "right_preauricular": rpa, "vertex": vertex}
+    out = {"nose_tip": nose, "nasion": nasion, "right_tragus": rpa, "left_tragus": lpa, **corners}
+    return {k: out[k] for k in TOUCH_ORDER if out.get(k) is not None}
 
 def build_scene(layers, centre, budget):
     total = sum(len(m.faces) for _, m, _ in layers)
@@ -135,6 +182,7 @@ def build_scene(layers, centre, budget):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--package", required=True); ap.add_argument("--head", required=True); ap.add_argument("--out", required=True)
+    ap.add_argument("--t1", help="T1 (e.g. orig.nii.gz) - used to find the eyes for the eye-corner landmarks")
     ap.add_argument("--budget", type=int, default=600000, help="triangle budget, full scene")
     ap.add_argument("--budget_lite", type=int, default=200000, help="triangle budget, lite scene")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
@@ -150,7 +198,7 @@ def main():
     centre = scalp.vertices.mean(0)
     seg_img = nib.load(os.path.join(a.package, "labels.nii.gz"))
     lm = landmarks(scalp, np.asanyarray(seg_img.dataobj).astype(int), seg_img.affine,
-                   head, head_img.affine, head_img.header.get_zooms()[:3])
+                   head, head_img.affine, head_img.header.get_zooms()[:3], nib.load(a.t1) if a.t1 else None)
 
     full, nf = build_scene(layers, centre, a.budget); full.export(os.path.join(a.out, "patient_scene.glb"))
     lite, nl = build_scene(layers, centre, a.budget_lite); lite.export(os.path.join(a.out, "patient_scene_lite.glb"))
@@ -171,6 +219,7 @@ def main():
         "landmarks": {k: {"ras_mm": np.round(p, 2).tolist(), "scene_m": np.round(to_scene(p, centre), 5).tolist(),
                           "status": "auto-estimated - verify on the model before registration",
                           "touch_hint": HINT[k]} for k, p in lm.items() if p is not None},
+        "touch_order": list(lm),
         "region_centroids_scene_m": {k: np.round(to_scene(v, centre), 5).tolist() for k, v in man["region_centroids_mm"].items()},
         "distance_maps": man["critical"],
         "triangles": {"full": nf, "lite": nl},

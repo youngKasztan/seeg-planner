@@ -127,7 +127,7 @@ def main():
     run([sys.executable, os.path.join(ROOT, "tools", "render_preview.py"), "--package", pkg, "--out", os.path.join(out, "preview.png")])
     # 6. headset files
     run([sys.executable, os.path.join(ROOT, "tools", "export_headset.py"), "--package", pkg, "--head", head,
-         "--out", os.path.join(out, "headset")])
+         "--t1", os.path.join(out, "orig.nii.gz"), "--out", os.path.join(out, "headset")])
     print("\nDONE ->", out)
 
 if __name__ == "__main__":

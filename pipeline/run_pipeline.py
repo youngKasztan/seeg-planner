@@ -4,7 +4,7 @@ run_pipeline.py - one command: raw patient exams -> brain package ready for SEEG
 Usage:
   python pipeline/run_pipeline.py --t1 T1.nii.gz [--mra MRA.nii.gz] [--truth vessels_expert.nii.gz] \
       [--dti_dir DTI/ --bvals bvals.txt --bvecs bvecs.txt] [--t1_gd T1_gd.nii.gz] \
-      [--ct CT.nii.gz [--ct_postimplant]] \
+      [--ct CT.nii.gz [--ct_postimplant]] [--venat VENAT_PartialVolume.nii.gz] \
       --out results/IXI057 --fastsurfer /path/to/FastSurfer [--device cpu|cuda]
 
 Steps (each is skipped if its output already exists, so a run can be resumed):
@@ -14,8 +14,14 @@ Steps (each is skipped if its output already exists, so a run can be resumed):
   3b. white-matter tracts from DTI (if given) -> tracts/
   3c. veins and sinuses from contrast T1      -> veins/
   3d. skull / electrodes from CT              -> ct/
+  3e. sulci (always); skull estimate from T1 if no CT; sagittal sinus prior if no contrast T1 -> extras/
+  3f. venous PRIOR from the VENAT atlas (if --venat and no contrast T1)                       -> priors/
   4. layer package (meshes, distance maps)    -> package/
   5. PNG preview                              -> preview.png
+  6. headset files (glTF scene, manifest, landmarks, phantom STL) -> headset/
+
+Layers that have no source exam are filled with a probabilistic prior or an estimate and are
+labelled as such in headset/headset_manifest.json ("origin"): they are never presented as patient data.
 """
 import argparse, os, subprocess, sys
 import numpy as np, nibabel as nib
@@ -36,6 +42,7 @@ def main():
     ap.add_argument("--dti_dir", help="folder with DTI volumes (*DTI-*.nii.gz)"); ap.add_argument("--bvals"); ap.add_argument("--bvecs")
     ap.add_argument("--t1_gd", help="post-contrast T1 -> veins and sinuses"); ap.add_argument("--ct", help="CT -> skull, scalp")
     ap.add_argument("--ct_postimplant", action="store_true", help="post-implant CT -> electrode contacts")
+    ap.add_argument("--venat", help="VENAT venous atlas (MNI, figshare 7205960) -> venous prior when no contrast T1")
     ap.add_argument("--out", required=True); ap.add_argument("--fastsurfer", required=True)
     ap.add_argument("--device", default="cpu"); ap.add_argument("--threads", default="2")
     a = ap.parse_args()
@@ -93,6 +100,22 @@ def main():
         run(cmd)
         extra += ["--layer", f"skull:{cdir}/skull.nii.gz"]
 
+    # 3e. structural extras from the T1 segmentation
+    xdir = os.path.join(out, "extras")
+    if not os.path.exists(os.path.join(xdir, "extras_report.json")):
+        run([sys.executable, os.path.join(HERE, "structural_extras.py"), "--t1", os.path.join(out, "orig.nii.gz"),
+             "--seg", seg, "--head", head, "--out", xdir])
+    extra += ["--layer", f"sulci:{xdir}/sulci.nii.gz:critical"]
+    if not a.ct: extra += ["--layer", f"skull_t1:{xdir}/skull_t1.nii.gz"]
+    if not a.t1_gd: extra += ["--layer", f"sinus_sss_prior:{xdir}/sss_prior.nii.gz:critical"]
+    # 3f. venous prior from the population atlas
+    if a.venat and not a.t1_gd:
+        pdir = os.path.join(out, "priors")
+        if not os.path.exists(os.path.join(pdir, "priors_report.json")):
+            run([sys.executable, os.path.join(HERE, "atlas_priors.py"), "--t1", os.path.join(out, "orig.nii.gz"),
+                 "--brainmask", os.path.join(out, "mask.nii.gz"), "--venat", a.venat, "--out", pdir])
+        extra += ["--layer", f"veins_prior:{pdir}/veins_prior.nii.gz:critical"]
+
     # 4. package
     pkg = os.path.join(out, "package")
     cmd = [sys.executable, os.path.join(HERE, "seeg_prep.py"), "--seg", seg, "--head", head,
@@ -102,6 +125,9 @@ def main():
 
     # 5. preview
     run([sys.executable, os.path.join(ROOT, "tools", "render_preview.py"), "--package", pkg, "--out", os.path.join(out, "preview.png")])
+    # 6. headset files
+    run([sys.executable, os.path.join(ROOT, "tools", "export_headset.py"), "--package", pkg, "--head", head,
+         "--out", os.path.join(out, "headset")])
     print("\nDONE ->", out)
 
 if __name__ == "__main__":

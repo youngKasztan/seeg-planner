@@ -122,6 +122,7 @@ def main():
         LAYERS["vessels"] = ([], [220, 30, 30, 255], True)
 
     DEFAULT_COL = {"cst": [255, 80, 80], "arcuate": [255, 220, 60], "optic": [80, 200, 255],
+                   "uncinate": [120, 255, 120], "ifof": [255, 120, 220], "sulci": [90, 170, 255],
                    "vein": [60, 90, 255], "sinus": [30, 40, 200], "skull": [240, 235, 220], "scalp": [230, 190, 170]}
     for spec in a.layer:
         parts = spec.split(":"); name, path = parts[0], parts[1]

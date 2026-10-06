@@ -5,6 +5,8 @@ Tracts critical for SEEG:
   cst_L / cst_R        corticospinal tract (motor): precentral cortex <-> brainstem
   arcuate_L            arcuate fasciculus (language, left hemisphere): Broca area <-> posterior temporal lobe
   optic_rad_L / _R     optic radiation: thalamus (LGN) <-> visual cortex
+  uncinate_L / _R      uncinate fasciculus (memory/language, temporal-lobe surgery risk): orbitofrontal <-> anterior temporal
+  ifof_L / _R          inferior fronto-occipital fasciculus (semantic language, vision): frontal <-> occipital
 
 Steps:
  1. stack DTI volumes into 4D + bvals/bvecs
@@ -42,7 +44,26 @@ TRACTS = {
     "arcuate_L":   ([1018, 1020], [1030, 1015, 1031], RIGHT + CEREB + [10, 16, 11, 12, 13, 1021, 1005, 1013], [255, 220, 60, 255]),
     "optic_rad_L": ([10],         [1021, 1005, 1013], RIGHT + CEREB + [16] + FRONTAL_L,           [80, 200, 255, 255]),
     "optic_rad_R": ([49],         [2021, 2005, 2013], LEFT + CEREB + [16] + FRONTAL_R,            [80, 200, 255, 255]),
+    "uncinate_L":  ([1012, 1014, 1019], {"labels": [1030, 1015, 1009], "part": "anterior", "frac": 0.35},
+                    RIGHT + CEREB + [10, 16, 1011, 1013, 1005, 1021, 1008, 1029, 1031], [120, 255, 120, 255]),
+    "uncinate_R":  ([2012, 2014, 2019], {"labels": [2030, 2015, 2009], "part": "anterior", "frac": 0.35},
+                    LEFT + CEREB + [49, 16, 2011, 2013, 2005, 2021, 2008, 2029, 2031], [120, 255, 120, 255]),
+    "ifof_L":      ([1012, 1014, 1019, 1020], [1011, 1013, 1005, 1021], RIGHT + CEREB + [10, 16],  [255, 120, 220, 255]),
+    "ifof_R":      ([2012, 2014, 2019, 2020], [2011, 2013, 2005, 2021], LEFT + CEREB + [49, 16],   [255, 120, 220, 255]),
 }
+
+def roi(seg, spec, aff):
+    """ROI from a label list, or {"labels": [...], "part": "anterior"|"posterior", "frac": f} =
+    only the most anterior/posterior fraction f of those labels (e.g. anterior temporal lobe)."""
+    if not isinstance(spec, dict):
+        return np.isin(seg, spec)
+    m = np.isin(seg, spec["labels"])
+    if not m.any(): return m
+    ijk = np.argwhere(m); y = nib.affines.apply_affine(aff, ijk)[:, 1]
+    cut = np.quantile(y, 1 - spec["frac"]) if spec["part"] == "anterior" else np.quantile(y, spec["frac"])
+    keep = ijk[y >= cut] if spec["part"] == "anterior" else ijk[y <= cut]
+    out = np.zeros_like(m); out[tuple(keep.T)] = True
+    return out
 
 def load_dti(d):
     files = sorted(glob.glob(os.path.join(d, "*DTI-*.nii.gz")))
@@ -140,7 +161,7 @@ def main():
     wm = np.isin(seg, [2, 41, 16, 28, 60])
     for name, (ra, rb, excl, _) in TRACTS.items():
         if a.only and name not in a.only.split(","): continue
-        A0, B0 = np.isin(seg, ra), np.isin(seg, rb)
+        A0, B0 = roi(seg, ra, daff), roi(seg, rb, daff)
         if not A0.any() or not B0.any():
             print(f"   {name}: ROI missing"); continue
         A = ndimage.binary_dilation(A0, iterations=3); B = ndimage.binary_dilation(B0, iterations=3)

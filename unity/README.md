@@ -21,8 +21,6 @@ Not yet run inside Unity / on a headset.
    **Simulate registration** places a virtual head at a random pose, "touches" the landmarks with ~2 mm noise
    and reports FRE + target error at the hippocampus - the same code path the headset uses.
    **Edit landmarks**: choose a landmark, click on the skin to move it; it is saved to `headset_manifest.json`.
-6. Electrode plan: run `planner/plan_seeg.py` (writes `plan.json` into the same folder), add the component
-   `PlanViewer` to `Patient` and drag `Patient` into its Loader field. The plan appears in a panel on the right.
 
 
 ## Headset setup (Quest 3)

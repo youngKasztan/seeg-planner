@@ -1,8 +1,0 @@
-[
- {"name": "L amygdala", "region": 18},
- {"name": "L hippocampus head", "region": 17, "part": "anterior"},
- {"name": "L hippocampus tail", "region": 17, "part": "posterior"},
- {"name": "L entorhinal cortex", "region": 1006},
- {"name": "L insula", "region": 1035},
- {"name": "L medial orbitofrontal", "region": 1014}
-]

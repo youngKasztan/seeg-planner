@@ -42,6 +42,15 @@ namespace SeegPlanner
             if (!await gltf.Load(new System.Uri(file).AbsoluteUri)) { Debug.LogError("Could not load " + file); return; }
             await gltf.InstantiateMainSceneAsync(PatientRoot);
 
+            // robot paths from the desktop planner (path_planner/app.py -> Export to headset), same coordinates
+            string paths = Path.Combine(dir, "paths.glb");
+            if (File.Exists(paths))
+            {
+                var g2 = new GltfImport();
+                if (await g2.Load(new System.Uri(paths).AbsoluteUri)) { await g2.InstantiateMainSceneAsync(PatientRoot); Debug.Log("Robot paths loaded"); }
+                else Debug.LogWarning("Could not load " + paths);
+            }
+
             foreach (Transform t in PatientRoot.GetComponentsInChildren<Transform>(true))
                 if (t != PatientRoot) Layers[t.name] = t.gameObject;
 

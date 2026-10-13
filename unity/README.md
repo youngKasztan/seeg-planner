@@ -21,6 +21,8 @@ Not yet run inside Unity / on a headset.
    **Simulate registration** places a virtual head at a random pose, "touches" the landmarks with ~2 mm noise
    and reports FRE + target error at the hippocampus - the same code path the headset uses.
    **Edit landmarks**: choose a landmark, click on the skin to move it; it is saved to `headset_manifest.json`.
+6. Robot paths: plan them in `path_planner/app.py` and press *Export to headset*; `paths.glb` in the same folder
+   is loaded automatically and shown inside the brain.
 
 
 ## Headset setup (Quest 3)

@@ -30,6 +30,7 @@ python pipeline/run_pipeline.py --t1 T1.nii.gz --mra MRA.nii.gz \
 | 4. Layer package | `pipeline/seeg_prep.py` | masks | `.glb` meshes, distance maps, `manifest.json` |
 | 5. Preview | `tools/render_preview.py` | package | PNG with up to 9 views |
 | 6. Headset files | `tools/export_headset.py` | package + head mask | `patient_scene.glb` (+ lite), `headset_manifest.json`, alignment landmarks, `head_phantom.stl` |
+| 7. Robot path planning | `path_planner/app.py` (desktop app / exe) | patient folder + clicked targets | curved continuum-robot paths, `plan.json` + `paths.glb` for the headset; see [path_planner/README.md](path_planner/README.md) |
 | Registration maths | `tools/registration.py` | landmarks / surface points | rigid fit (Kabsch) + ICP, FRE/TRE (self-test) |
 | Vessel check | `tools/render_vessel_check.py` | MRA + automatic + expert masks | MIP overlay + Dice |
 
@@ -90,6 +91,7 @@ orbital fat); eye corners use typical eye dimensions. Check and correct them in 
 python tests/test_ct_phantom.py
 python tests/test_veins_phantom.py
 python tools/registration.py      # landmark + ICP registration self-test
+python tests/test_path_planner.py # continuum robot path planner on a synthetic head
 ```
 
 ## Test data

@@ -1,0 +1,102 @@
+# ---------------------------------------------------------------------------------------------
+# Continuum robot path planner - all constraints in one place.
+# Change the numbers here and press "Reload config" in the app (or restart it). No code changes.
+# Distances in millimetres, angles in degrees.
+# ---------------------------------------------------------------------------------------------
+
+[robot]
+diameter_mm         = 2.0     # outer diameter of the robot body (its radius is added to every safety margin)
+min_bend_radius_mm  = 40.0    # tightest curve the robot can follow; large = wide, sweeping curves
+max_length_mm       = 150.0   # longest inserted length, skin to final target
+straight_entry_mm   = 15.0    # first part is straight (through skin and bone, after drilling)
+max_entry_angle_deg = 30.0    # angle between the robot and the skin normal at the entry point
+max_total_turn_deg  = 150.0   # total change of direction along one path
+
+[planning]
+search_grid_mm        = 2.0   # resolution of the coarse route search
+sample_step_mm        = 1.0   # how densely a path is checked
+target_tolerance_mm   = 3.0   # zones marked ignore_near_targets are not checked this close to a target
+insertion_cost_mm     = 40.0  # one extra insertion "costs" as much as this much path length;
+                              # higher = the planner tries harder to reach several targets with one path
+max_targets_per_path  = 3
+group_max_distance_mm = 60.0  # targets further apart than this are never put on one path
+entry_candidates      = 3     # entry points tried per path
+optimizer_iterations  = 150
+curvature_weight      = 0.5   # higher = straighter, more sweeping paths (cost of bending)
+
+[entry_zone]                  # uses the landmarks in headset/headset_manifest.json
+exclude_face               = true
+exclude_frontal_sinus      = true
+exclude_midline_mm         = 15.0   # no entry this close to the midline (sagittal sinus)
+min_height_above_tragus_mm = 5.0    # below this is skull base / neck
+ear_exclusion_radius_mm    = 30.0
+
+# ---------------------------------------------------------------------------------------------
+# NO-GO zones (hard): the robot body must stay at least margin_mm away (plus its radius).
+#   labels = FreeSurfer/DKT labels from the segmentation, mask = file(s) in the patient folder
+#   ignore_near_targets = true -> not checked within target_tolerance_mm of a target
+# ---------------------------------------------------------------------------------------------
+[no_go.arteries]
+mask = ["vessels_auto.nii.gz"]
+margin_mm = 2.0
+ignore_near_targets = false
+
+[no_go.ventricles]
+labels = [4, 5, 14, 15, 43, 44, 72]
+margin_mm = 1.5
+ignore_near_targets = true
+
+[no_go.brainstem]
+labels = [16]
+margin_mm = 3.0
+ignore_near_targets = false
+
+[no_go.cerebellum]
+labels = [7, 8, 46, 47]
+margin_mm = 1.0
+ignore_near_targets = false
+
+[no_go.sagittal_sinus]
+mask = ["extras/sss_prior.nii.gz"]
+margin_mm = 3.0
+ignore_near_targets = false
+
+[no_go.outside_brain]          # after the straight entry the robot must stay inside the brain
+outside_of = "mask.nii.gz"
+margin_mm = 1.0
+ignore_near_targets = true
+
+# ---------------------------------------------------------------------------------------------
+# SOFT zones: allowed, but the planner prefers to stay away.
+#   cost per mm of path = weight * exp(-distance / scale_mm)
+# ---------------------------------------------------------------------------------------------
+[avoid.veins_prior]
+mask = ["priors/veins_prior.nii.gz"]
+weight = 3.0
+scale_mm = 3.0
+
+[avoid.sulci]
+mask = ["extras/sulci.nii.gz"]
+weight = 1.0
+scale_mm = 1.5
+
+[avoid.eloquent_cortex]        # motor, sensory, visual, auditory, language (left)
+labels = [1024, 2024, 1022, 2022, 1021, 2021, 1034, 2034, 1018, 1020, 1030, 1031]
+weight = 2.0
+scale_mm = 3.0
+
+[avoid.corticospinal_tract]
+mask = ["tracts/cst_L.nii.gz", "tracts/cst_R.nii.gz"]
+weight = 3.0
+scale_mm = 3.0
+
+[avoid.optic_radiation]
+mask = ["tracts/optic_rad_L.nii.gz", "tracts/optic_rad_R.nii.gz"]
+weight = 2.0
+scale_mm = 3.0
+
+[avoid.other_tracts]
+mask = ["tracts/arcuate_L.nii.gz", "tracts/uncinate_L.nii.gz", "tracts/uncinate_R.nii.gz",
+        "tracts/ifof_L.nii.gz", "tracts/ifof_R.nii.gz"]
+weight = 0.5
+scale_mm = 3.0

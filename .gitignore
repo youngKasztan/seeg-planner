@@ -10,3 +10,9 @@ wyniki/
 *.trk
 __pycache__/
 *.pyc
+
+# path planner build
+path_planner/.venv/
+path_planner/build/
+path_planner/dist/
+*.spec

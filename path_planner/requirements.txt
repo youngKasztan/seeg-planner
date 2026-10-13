@@ -1,0 +1,10 @@
+numpy
+scipy
+nibabel
+scikit-image
+trimesh
+matplotlib
+PySide6
+pyvista
+pyvistaqt
+pyinstaller

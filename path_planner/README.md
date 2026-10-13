@@ -1,0 +1,47 @@
+# Continuum robot path planner (desktop app)
+
+Pick targets on the MRI slices, compute safe curved paths for a continuum robot, export them to the headset.
+The headset only displays the result (brain + paths); all planning happens here.
+
+![app](../docs/path_planner_app.png)
+
+## Use
+1. **Open patient folder** - the output folder of `pipeline/run_pipeline.py` (needs `orig.nii.gz`,
+   `aparc.DKTatlas+aseg.deep.nii.gz`, `head.nii.gz`, `mask.nii.gz`, the masks named in `robot.toml`, and
+   `headset/headset_manifest.json`). Loading takes ~30 s (safety maps are computed).
+2. **Targets**: scroll through axial / coronal / sagittal slices (mouse wheel, Shift = 5 slices),
+   **left click** adds a target on the current slice, **right click** moves the cursor. Targets can be on
+   different slices. Double click a target to rename it. A target that is itself inside a no-go zone is shown
+   in red; *Snap to safe point* moves it to the closest safe point (max 5 mm).
+3. **Plan paths** - for every target, and for groups of 2-3 nearby targets, the planner looks for a path;
+   it then decides itself how many insertions are needed (one path through several targets when that is safe).
+4. **Export to headset** - writes `plan.json` and `paths.glb` into `headset/`; the Unity app (`PatientLoader`)
+   loads `paths.glb` automatically. Copy the headset folder to the glasses as before.
+
+## Robot constraints and no-go zones: `robot.toml`
+All limits are in `robot.toml` (next to the exe after building): robot diameter, minimum bend radius,
+maximum length, straight entry length, entry angle, total turning; no-go zones (hard, with safety margins)
+and soft zones (preferred distance). Edit, save, press **Reload robot.toml**. No code changes needed.
+
+## How a path is found
+1. Coarse route on a 2 mm grid (minimum-cost path, `skimage.graph.MCP`): impassable in no-go zones,
+   expensive near them and in soft zones.
+2. The robot path = straight entry (through skin and bone) + cubic spline through the targets.
+   The spline is optimised (`scipy` L-BFGS) for: no-go clearance (hard), bend radius >= minimum (hard),
+   entry angle, total turning and length limits (hard), then short + sweeping + far from soft zones.
+   Several starting guesses (coarse routes from different entries, straight lines) are tried.
+3. Every result is checked against all hard limits; only paths that pass are used.
+4. An integer program (`scipy.milp`) picks the set of paths that covers all targets with the lowest
+   `path cost + insertion_cost_mm` per insertion.
+
+## Build the Windows exe
+Double click `build_exe.bat` (Python 3.11 must be installed). Result: `dist\ContinuumPathPlanner\ContinuumPathPlanner.exe`.
+Without building: `run_app.bat` (or `python app.py`). Self-test without a window: `python app.py --selftest <patient folder>`.
+
+Note: Windows Smart App Control may block an unsigned exe. If it does, use `run_app.bat`.
+
+## Test
+`python tests/test_path_planner.py` - synthetic head: artery above a target, two targets on one line (one path),
+target inside an artery (reported).
+
+Research prototype - not for clinical use.

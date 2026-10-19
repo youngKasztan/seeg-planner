@@ -13,8 +13,16 @@ The headset only displays the result (brain + paths); all planning happens here.
    **left click** adds a target on the current slice, **right click** moves the cursor. Targets can be on
    different slices. Double click a target to rename it. A target that is itself inside a no-go zone is shown
    in red; *Snap to safe point* moves it to the closest safe point (max 5 mm).
+   **Layers** (right panel, tick to show on the slices and in 3D):
+   - *No-go zones* and *Soft zones* = exactly the zones the planner uses (from `robot.toml`), with their margins / weights
+   - *Anatomy, Eloquent cortex, White-matter tracts, Vessels, Head* = the same layers as the headset model
+     (display only, they do not change the plan); [PRIOR] / [ESTIMATE] / [atlas function] mark layers that are
+     not measured in this patient
 3. **Plan paths** - for every target, and for groups of 2-3 nearby targets, the planner looks for a path;
    it then decides itself how many insertions are needed (one path through several targets when that is safe).
+   Every target alone takes ~10-20 s. Groups are tried after that, most promising first, until
+   `time_limit_s` (robot.toml, default 120 s); groups that cannot be shorter than separate paths are skipped.
+   **Stop** ends the planning at any time; if the single paths are already done they are kept.
 4. **Export to headset** - writes `plan.json` and `paths.glb` into `headset/`; the Unity app (`PatientLoader`)
    loads `paths.glb` automatically. Copy the headset folder to the glasses as before.
 
@@ -22,6 +30,20 @@ The headset only displays the result (brain + paths); all planning happens here.
 All limits are in `robot.toml` (next to the exe after building): robot diameter, minimum bend radius,
 maximum length, straight entry length, entry angle, total turning; no-go zones (hard, with safety margins)
 and soft zones (preferred distance). Edit, save, press **Reload robot.toml**. No code changes needed.
+
+| No-go zone (hard) | Source | Margin |
+|---|---|---|
+| arteries | TOF-MRA, automatic segmentation | 2 mm |
+| ventricles | T1 segmentation | 1.5 mm (not checked right at a target) |
+| choroid plexus | T1 segmentation | 1 mm |
+| midline (falx, interhemispheric fissure, corpus callosum midline) | computed from the segmentation | 1 mm - a path never crosses to the other hemisphere |
+| hypothalamus (ventral diencephalon), optic chiasm | T1 segmentation | 2 mm |
+| brainstem, cerebellum | T1 segmentation | 3 mm, 1 mm |
+| superior sagittal sinus | PRIOR from anatomical rules (no venography) | 3 mm |
+| outside the brain (after the straight entry) | brain mask | 1 mm |
+
+Soft zones (allowed, the planner keeps away): veins (VENAT atlas PRIOR), deep grey nuclei (may be targets),
+sulci, eloquent cortex (DKT atlas), corticospinal tract, optic radiation, other tracts (DTI).
 
 ## How a path is found
 1. Coarse route on a 2 mm grid (minimum-cost path, `skimage.graph.MCP`): impassable in no-go zones,
@@ -32,7 +54,10 @@ and soft zones (preferred distance). Edit, save, press **Reload robot.toml**. No
    Several starting guesses (coarse routes from different entries, straight lines) are tried.
 3. Every result is checked against all hard limits; only paths that pass are used.
 4. An integer program (`scipy.milp`) picks the set of paths that covers all targets with the lowest
-   `path cost + insertion_cost_mm` per insertion.
+   `path cost + insertion_cost_mm` per insertion. Paths used together must not collide: their robot bodies
+   keep `min_path_distance_mm` apart and their skin entries `min_entry_distance_mm` apart. For every target
+   up to 3 feasible paths from different entries are kept, so a clash is solved by taking another entry;
+   a target that still cannot get a non-colliding path is reported in the log.
 
 ## Build the Windows exe
 Double click `build_exe.bat` (Python 3.11 must be installed). Result: `dist\ContinuumPathPlanner\ContinuumPathPlanner.exe`.
@@ -42,6 +67,6 @@ Note: Windows Smart App Control may block an unsigned exe. If it does, use `run_
 
 ## Test
 `python tests/test_path_planner.py` - synthetic head: artery above a target, two targets on one line (one path),
-target inside an artery (reported).
+target inside an artery (reported), Stop during planning, time limit, two crossing paths (alternative entry used).
 
 Research prototype - not for clinical use.

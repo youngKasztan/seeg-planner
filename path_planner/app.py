@@ -14,9 +14,9 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import config, labels
+import config, labels, layers
 from patient import Patient
-from planner import Planner
+from planner import Planner, Cancelled
 import export
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -30,17 +30,22 @@ PATH_COLOURS = export.COLOURS
 
 # ---------------------------------------------------------------------------------------------- workers
 class Worker(QtCore.QThread):
-    """Runs a function in the background; reports log lines and progress."""
+    """Runs a function in the background; reports log lines and progress.
+    The function never touches widgets: it only emits signals, which Qt delivers to the main thread."""
     log = QtCore.Signal(str)
     progress = QtCore.Signal(float, str)
     done = QtCore.Signal(object)
     failed = QtCore.Signal(str)
+    cancelled = QtCore.Signal()
 
     def __init__(self, fn):
-        super().__init__(); self.fn = fn
+        super().__init__(); self.fn = fn; self.stop_requested = False
+
+    def stop(self): self.stop_requested = True
 
     def run(self):
-        try: self.done.emit(self.fn(self.log.emit, lambda f, m="": self.progress.emit(f, m)))
+        try: self.done.emit(self.fn(self.log.emit, lambda f, m="": self.progress.emit(float(f), str(m))))
+        except Cancelled: self.cancelled.emit()
         except Exception: self.failed.emit(traceback.format_exc())
 
 # ---------------------------------------------------------------------------------------------- slice view
@@ -62,7 +67,7 @@ class SliceView(QtWidgets.QWidget):
         self.slider.valueChanged.connect(self._slider)
         self.canvas.mpl_connect("scroll_event", self._scroll)
         self.canvas.mpl_connect("button_press_event", self._press)
-        self.img = self.ov_nogo = self.ov_soft = None
+        self.img = self.ov = None
         self.artists = []
 
     def setup(self, shape):
@@ -106,16 +111,15 @@ class SliceView(QtWidgets.QWidget):
         if self.img is None:
             self.ax.clear(); self.ax.axis("off")
             self.img = self.ax.imshow(sl, cmap="gray", origin="lower", vmin=0, vmax=1, interpolation="bilinear")
-            self.ov_nogo = self.ax.imshow(np.zeros(sl.shape + (4,)), origin="lower", interpolation="nearest")
-            self.ov_soft = self.ax.imshow(np.zeros(sl.shape + (4,)), origin="lower", interpolation="nearest")
+            self.ov = self.ax.imshow(np.zeros(sl.shape + (4,)), origin="lower", interpolation="nearest")
             h, w = sl.shape
             for txt, x in (("R", w - 12), ("L", 4)) if self.axis != 0 else (("A", w - 12), ("P", 4)):
                 self.ax.text(x, h - 14, txt, color="#8cf", fontsize=11, weight="bold")
         self.img.set_data(sl)
-        def rgba(mask, col, alpha):
-            m = self.take(mask, k); o = np.zeros(m.shape + (4,), np.float32); o[m] = (*col, alpha); return o
-        self.ov_nogo.set_data(rgba(p.nogo_union, (1, 0.15, 0.15), 0.45) if a.chk_nogo.isChecked() else np.zeros(sl.shape + (4,)))
-        self.ov_soft.set_data(rgba(p.soft_union, (1, 0.85, 0.1), 0.25) if a.chk_soft.isChecked() else np.zeros(sl.shape + (4,)))
+        o = np.zeros(sl.shape + (4,), np.float32)                  # all ticked layers, in list order
+        for key, mask, col, alpha in a.visible_layers():
+            m = self.take(mask, k); o[m] = (*col, alpha)
+        self.ov.set_data(o)
         for art in self.artists: art.remove()
         self.artists = []
         u, v, _ = self.uv(a.cursor)
@@ -142,6 +146,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(APP_NAME); self.resize(1500, 950)
         self.cfg = config.load(); self.patient = self.planner = None
         self.targets, self.paths, self.uncovered, self.cursor = {}, [], [], np.zeros(3, int)
+        self.layer_items, self.layer_meshes = {}, {}               # key -> (tree item, mask getter, colour, alpha)
         self.worker = None
         self._build_ui()
         self._log(f"Robot config: {self.cfg['_path']}")
@@ -171,28 +176,32 @@ class MainWindow(QtWidgets.QMainWindow):
             lab = QtWidgets.QLabel(f"3D view not available:\n{ex}"); lab.setAlignment(QtCore.Qt.AlignCenter); grid.addWidget(lab, 1, 1)
         self.setCentralWidget(central)
 
-        side = QtWidgets.QWidget(); sl = QtWidgets.QVBoxLayout(side); side.setMinimumWidth(380)
+        side = QtWidgets.QWidget(); sl = QtWidgets.QVBoxLayout(side); side.setMinimumWidth(430)
         sl.addWidget(QtWidgets.QLabel("<b>Targets</b>  (left click on a slice to add; double click a name to rename)"))
         self.tlist = QtWidgets.QListWidget(); self.tlist.itemDoubleClicked.connect(self.rename_target)
-        self.tlist.currentRowChanged.connect(self.goto_target); sl.addWidget(self.tlist, 2)
+        self.tlist.currentRowChanged.connect(self.goto_target); sl.addWidget(self.tlist, 1)
         row = QtWidgets.QHBoxLayout()
         for text, fn in (("Delete", self.delete_target), ("Snap to safe point", self.snap_target), ("Clear all", self.clear_targets)):
             b = QtWidgets.QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
         sl.addLayout(row)
-        row = QtWidgets.QHBoxLayout()
-        self.chk_nogo = QtWidgets.QCheckBox("No-go zones"); self.chk_nogo.setChecked(True)
-        self.chk_soft = QtWidgets.QCheckBox("Soft zones"); self.chk_paths = QtWidgets.QCheckBox("Paths"); self.chk_paths.setChecked(True)
-        for c in (self.chk_nogo, self.chk_soft, self.chk_paths): c.toggled.connect(self.redraw); row.addWidget(c)
-        sl.addLayout(row)
+        sl.addWidget(QtWidgets.QLabel("<b>Layers</b>  (tick to show on the slices and in 3D)"))
+        self.ltree = QtWidgets.QTreeWidget(); self.ltree.setHeaderHidden(True)
+        self.ltree.itemChanged.connect(self._layer_toggled); sl.addWidget(self.ltree, 5)
+        self.chk_paths = QtWidgets.QCheckBox("Show paths"); self.chk_paths.setChecked(True)
+        self.chk_paths.toggled.connect(self.redraw); sl.addWidget(self.chk_paths)
         self.btn_plan = QtWidgets.QPushButton("Plan paths"); self.btn_plan.setStyleSheet("font-weight: bold; padding: 8px")
-        self.btn_plan.clicked.connect(self.plan); sl.addWidget(self.btn_plan)
+        self.btn_plan.clicked.connect(self.plan)
+        self.btn_stop = QtWidgets.QPushButton("Stop"); self.btn_stop.setEnabled(False)
+        self.btn_stop.setToolTip("Stop planning (paths already found for groups of targets are kept)")
+        self.btn_stop.clicked.connect(self.stop_task)
+        row = QtWidgets.QHBoxLayout(); row.addWidget(self.btn_plan, 1); row.addWidget(self.btn_stop); sl.addLayout(row)
         self.bar = QtWidgets.QProgressBar(); self.bar.setRange(0, 1000); sl.addWidget(self.bar)
         sl.addWidget(QtWidgets.QLabel("<b>Paths</b>"))
         self.rlist = QtWidgets.QTreeWidget(); self.rlist.setHeaderLabels(["Path", "Length", "Min radius", "Closest no-go"])
-        self.rlist.setRootIsDecorated(False); sl.addWidget(self.rlist, 2)
+        self.rlist.setRootIsDecorated(False); sl.addWidget(self.rlist, 1)
         self.btn_export = QtWidgets.QPushButton("Export to headset"); self.btn_export.clicked.connect(self.export); sl.addWidget(self.btn_export)
         sl.addWidget(QtWidgets.QLabel("<b>Log</b>"))
-        self.logbox = QtWidgets.QPlainTextEdit(); self.logbox.setReadOnly(True); sl.addWidget(self.logbox, 3)
+        self.logbox = QtWidgets.QPlainTextEdit(); self.logbox.setReadOnly(True); sl.addWidget(self.logbox, 2)
         dock = QtWidgets.QDockWidget("Planner", self); dock.setWidget(side); dock.setFeatures(QtWidgets.QDockWidget.NoDockWidgetFeatures)
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
         self.status = self.statusBar()
@@ -202,18 +211,49 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _busy(self, on):
         for w in (self.btn_plan, self.btn_export): w.setEnabled(not on)
+        self.btn_stop.setEnabled(on)
+
+    def busy(self):
+        return self.worker is not None and self.worker.isRunning()
 
     def _run(self, fn, done):
-        if self.worker and self.worker.isRunning():
-            self._log("busy - wait for the current task"); return
+        if self.busy():
+            self._log("busy - wait for the current task or press Stop"); return False
         self._busy(True)
+        self._done_cb = done
         self.worker = Worker(fn)
+        # connected to methods of this window (lives in the main thread) -> always run in the main thread
         self.worker.log.connect(self._log)
-        self.worker.progress.connect(lambda f, m: (self.bar.setValue(int(f * 1000)), self.status.showMessage(m)))
-        self.worker.done.connect(lambda r: (self._busy(False), done(r)))
-        self.worker.failed.connect(lambda tb: (self._busy(False), self._log("ERROR:\n" + tb),
-                                               QtWidgets.QMessageBox.critical(self, APP_NAME, tb.splitlines()[-1])))
+        self.worker.progress.connect(self._on_progress)
+        self.worker.done.connect(self._on_done)
+        self.worker.failed.connect(self._on_failed)
+        self.worker.cancelled.connect(self._on_cancelled)
         self.worker.start()
+        return True
+
+    def _on_progress(self, f, msg):
+        self.bar.setValue(int(f * 1000)); self.status.showMessage(msg)
+
+    def _on_done(self, res):
+        self._busy(False); self._done_cb(res)
+
+    def _on_failed(self, tb):
+        self._busy(False); self._log("ERROR:\n" + tb)
+        QtWidgets.QMessageBox.critical(self, APP_NAME, tb.strip().splitlines()[-1])
+
+    def _on_cancelled(self):
+        self._busy(False); self.bar.setValue(0); self.status.showMessage("stopped"); self._log("Stopped.")
+
+    def stop_task(self):
+        if self.busy():
+            self.worker.stop(); self.btn_stop.setEnabled(False)
+            self._log("Stopping ... (finishing the current step)")
+
+    def closeEvent(self, ev):
+        if self.busy():                                          # never destroy a running thread
+            self.worker.stop(); self.status.showMessage("stopping the planner before closing ...")
+            self.worker.wait(30000)
+        super().closeEvent(ev)
 
     # ------------------------------------------------------------------ patient
     def open_folder(self, folder=None):
@@ -240,7 +280,58 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bar.setValue(1000); self.status.showMessage("Left click on a slice to add a target")
         tf = os.path.join(p.folder, "targets.json")
         if os.path.exists(tf): self.load_targets(tf)
-        self._build_3d(); self.redraw()
+        self._build_layer_tree(); self._build_3d(); self.redraw()
+
+    # ------------------------------------------------------------------ layers
+    def _build_layer_tree(self):
+        """No-go and soft zones from robot.toml (used by the planner) + all display layers of the headset model."""
+        p, cfg = self.patient, self.cfg
+        self.ltree.blockSignals(True); self.ltree.clear(); self.layer_items = {}
+        def swatch(col):
+            pm = QtGui.QPixmap(12, 12); pm.fill(QtGui.QColor.fromRgbF(*col)); return QtGui.QIcon(pm)
+        def group(title, tip):
+            g = QtWidgets.QTreeWidgetItem(self.ltree, [title]); g.setToolTip(0, tip)
+            f = g.font(0); f.setBold(True); g.setFont(0, f); g.setExpanded(True); return g
+        def add(parent, key, text, getter, col, alpha, checked, tip=""):
+            it = QtWidgets.QTreeWidgetItem(parent, [text]); it.setIcon(0, swatch(col)); it.setToolTip(0, tip)
+            it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(0, QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+            self.layer_items[key] = (it, getter, col, alpha)
+        tag = lambda n: " [PRIOR]" if "prior" in n else " [atlas function]" if "eloquent" in n else ""
+        g = group("No-go zones (hard limit, robot must stay out)", "From robot.toml [no_go]; robot radius is added to each margin")
+        for n, z in cfg.get("no_go", {}).items():
+            if n not in p.zone_masks: continue
+            out = "outside_of" in z
+            text = (f"{n}  (whole head outside the brain, margin {z['margin_mm']} mm)" if out else
+                    f"{n}  (margin {z['margin_mm']} mm{', ignored near targets' if z.get('ignore_near_targets') else ''}){tag(n)}")
+            add(g, "nogo:" + n, text, (lambda n=n: p.zone_masks[n]), layers.zone_colour(n), 0.25 if out else 0.5, not out)
+        g = group("Soft zones (allowed, planner keeps away)", "From robot.toml [avoid]: cost = weight * exp(-distance / scale)")
+        for n, z in cfg.get("avoid", {}).items():
+            if n not in p.soft_masks: continue
+            add(g, "soft:" + n, f"{n}  (weight {z['weight']}, {z['scale_mm']} mm){tag(n)}", (lambda n=n: p.soft_masks[n]),
+                layers.zone_colour(n, (1.0, 0.85, 0.1)), 0.35, False)
+        for grp in layers.GROUPS:
+            items = [L for L in layers.CATALOG if L[1] == grp]
+            g = group(grp + "  (display only)", "Same layers as the headset model; they do not change the plan")
+            for key, _, src, col, origin in items:
+                if "mask" in src and not all(os.path.exists(os.path.join(p.folder, f)) for f in src["mask"]): continue
+                o = "" if origin == "patient" else f" [{origin}]"
+                add(g, "layer:" + key, key + o, (lambda src=src, key=key: p.display_mask(key, src)), col, 0.4, False,
+                    f"source: {', '.join(src['mask']) if 'mask' in src else 'segmentation labels'}")
+        self.ltree.blockSignals(False)
+
+    def visible_layers(self):
+        out = []
+        for key, (it, getter, col, alpha) in self.layer_items.items():
+            if it.checkState(0) == QtCore.Qt.Checked:
+                m = getter()
+                if m is not None: out.append((key, m, col, alpha))
+        return out
+
+    def _layer_toggled(self, item, col):
+        key = next((k for k, v in self.layer_items.items() if v[0] is item), None)
+        if key is None: return
+        self.redraw(); self._update_3d_layer(key)
 
     def reload_config(self):
         try: self.cfg = config.load(self.cfg["_path"])
@@ -328,12 +419,17 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ planning
     def plan(self):
         if not (self.planner and self.targets): self._log("open a patient and add targets first"); return
-        targets, pl = dict(self.targets), self.planner
+        if self.busy(): self._log("busy - wait for the current task or press Stop"); return
+        targets, pl = {k: np.array(v, float) for k, v in self.targets.items()}, self.planner
         pl.robot, pl.pl = self.cfg["robot"], self.cfg["planning"]; pl.cfg = self.cfg
-        self._log(f"Planning {len(targets)} target(s) ...")
+        n = len(targets)
+        self._log(f"Planning {n} target(s) ... (each target alone, then groups of targets on one path; "
+                  f"time limit {self.cfg['planning'].get('time_limit_s', 120)} s, Stop keeps what was found)")
         def job(log, progress):
             pl.log, pl.progress = log, progress
-            return pl.plan_all(targets)
+            pl.should_stop = lambda: self.worker.stop_requested
+            try: return pl.plan_all(targets)
+            finally: pl.should_stop = lambda: False
         self._run(job, self._planned)
 
     def _planned(self, res):
@@ -373,27 +469,39 @@ class MainWindow(QtWidgets.QMainWindow):
     def redraw(self):
         for v in self.views: v.redraw()
 
-    def _build_3d(self):
-        if self.view3d is None: return
+    def _mesh(self, mask, step):
         import pyvista as pv
         from skimage import measure
         from scipy import ndimage
-        p = self.patient; v3 = self.view3d; v3.clear()
-        def mesh(mask, step=2):
-            m = ndimage.zoom(mask.astype(np.float32), 1 / step, order=1)
-            if m.max() < 0.5: return None
-            vv, ff, _, _ = measure.marching_cubes(m, 0.5)
-            pts = p.vox_to_mm(vv * step)
-            return pv.PolyData(pts, np.hstack([np.full((len(ff), 1), 3), ff]).ravel())
-        b = mesh(p.brain)
-        if b is not None: v3.add_mesh(b, color=[0.85, 0.7, 0.7], opacity=0.12, name="brain")
-        if "arteries" in p.zone_masks:
-            a = mesh(p.zone_masks["arteries"], 1)
-            if a is not None: v3.add_mesh(a, color="red", opacity=0.6, name="arteries")
-        if "ventricles" in p.zone_masks:
-            a = mesh(p.zone_masks["ventricles"], 1)
-            if a is not None: v3.add_mesh(a, color=[0.3, 0.55, 1], opacity=0.5, name="ventricles")
+        m = ndimage.zoom(mask.astype(np.float32), 1 / step, order=1) if step > 1 else mask.astype(np.float32)
+        if m.max() < 0.5: return None
+        vv, ff, _, _ = measure.marching_cubes(np.pad(m, 1), 0.5)
+        pts = self.patient.vox_to_mm((vv - 1) * step)
+        return pv.PolyData(pts, np.hstack([np.full((len(ff), 1), 3), ff]).ravel())
+
+    def _build_3d(self):
+        if self.view3d is None: return
+        p = self.patient; v3 = self.view3d; v3.clear(); self.layer_meshes = {}
+        b = self._mesh(p.brain, 2)
+        if b is not None: v3.add_mesh(b, color=[0.85, 0.7, 0.7], opacity=0.10, name="brain")
+        for key in self.layer_items: self._update_3d_layer(key)
         v3.view_xz(); v3.reset_camera(); self._update_3d_targets()
+
+    def _update_3d_layer(self, key):
+        if self.view3d is None or self.patient is None: return
+        it, getter, col, alpha = self.layer_items[key]
+        name = "L_" + key
+        if it.checkState(0) != QtCore.Qt.Checked or key.startswith("nogo:outside"):
+            self.view3d.remove_actor(name); return
+        if key not in self.layer_meshes:
+            m = getter()
+            if m is None: return
+            big = m.sum() * self.patient.vox.prod() / 1000 > 100            # > 100 ml: coarser mesh
+            self.layer_meshes[key] = self._mesh(m, 2 if big else 1)
+        mesh = self.layer_meshes[key]
+        if mesh is not None:
+            self.view3d.add_mesh(mesh, color=col, opacity=0.25 if key.endswith(("gray_matter", "white_matter", "scalp", "skull_t1")) else 0.7,
+                                 name=name, smooth_shading=True)
 
     def _update_3d_targets(self):
         if self.view3d is None or self.patient is None: return

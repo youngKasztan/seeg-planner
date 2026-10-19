@@ -12,6 +12,7 @@ __pycache__/
 *.pyc
 
 # path planner build
+.venv/
 path_planner/.venv/
 path_planner/build/
 path_planner/dist/

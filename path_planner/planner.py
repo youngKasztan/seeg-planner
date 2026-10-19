@@ -15,15 +15,43 @@ For one ordered list of targets the planner
 Several targets: every target alone, plus ordered groups of 2-3 nearby targets on one path, are planned;
 an integer program then picks the cheapest set of paths covering all targets
 (cost = path cost + insertion_cost_mm per insertion), so the program decides itself whether targets
-share a path.
+share a path. The number of groups grows fast with the number of targets, so groups are
+  - skipped when they provably cannot beat separate paths (their length alone is already too long),
+  - tried in the most promising order first (coarse route cost) and not re-tried once one order works,
+  - planned only until time_limit_s; groups left over are skipped and reported in the log.
+Planning can be stopped at any time (should_stop callback -> Cancelled).
 """
 import itertools, time
 from dataclasses import dataclass, field
 import numpy as np
 from scipy import ndimage
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline   # noqa: F401  (reference implementation, see clamped_spline)
 from scipy.optimize import minimize
 from skimage.graph import MCP_Geometric
+
+def clamped_spline(s, P, u, ss):
+    """Cubic spline through points P (n+1 x 3) at parameters s, first derivative u at the start and zero second
+    derivative at the end; returns position, 1st and 2nd derivative at ss.
+    Same result as scipy CubicSpline(s, P, bc_type=((1, u), (2, 0))) but ~5x faster for the few knots used here
+    (the optimiser evaluates it ~10 000 times per path)."""
+    n = len(s) - 1
+    h = np.diff(s); dlt = np.diff(P, axis=0) / h[:, None]
+    A = np.zeros((n + 1, n + 1)); B = np.empty((n + 1, 3))
+    A[0, 0] = 1.0; B[0] = u                                         # clamped start: slope = u
+    if n > 1:                                                       # continuity of the 2nd derivative
+        i = np.arange(1, n)
+        A[i, i - 1], A[i, i], A[i, i + 1] = h[1:], 2 * (h[:-1] + h[1:]), h[:-1]
+        B[1:n] = 3 * (h[1:, None] * dlt[:-1] + h[:-1, None] * dlt[1:])
+    A[n, n - 1], A[n, n] = 1.0, 2.0; B[n] = 3 * dlt[n - 1]           # natural end: 2nd derivative = 0
+    m = np.linalg.solve(A, B)                                       # slopes at the knots
+    c2 = (3 * dlt - 2 * m[:-1] - m[1:]) / h[:, None]
+    c3 = (m[:-1] + m[1:] - 2 * dlt) / (h ** 2)[:, None]
+    i = np.clip(np.searchsorted(s, ss, side="right") - 1, 0, n - 1)
+    x = (ss - s[i])[:, None]
+    r = P[i] + m[i] * x + c2[i] * x ** 2 + c3[i] * x ** 3
+    d1 = m[i] + 2 * c2[i] * x + 3 * c3[i] * x ** 2
+    d2 = 2 * c2[i] + 6 * c3[i] * x
+    return r, d1, d2
 
 @dataclass
 class PathResult:
@@ -39,10 +67,14 @@ class PathResult:
     min_clearance_mm: dict = field(default_factory=dict)   # zone -> closest approach of the robot SURFACE
     problems: list = field(default_factory=list)
 
+class Cancelled(Exception):
+    """Raised when the user stops the planning."""
+
 class Planner:
     def __init__(self, patient, cfg, log=print, progress=None):
         self.p, self.cfg, self.log, self.progress = patient, cfg, log, progress or (lambda f, msg="": None)
         self.robot, self.pl = cfg["robot"], cfg["planning"]
+        self.should_stop = lambda: False                             # set by the app (Stop button)
         self._build_search_grid()
         self._build_entries()
         self.mcp = {}
@@ -138,26 +170,26 @@ class Planner:
         """Decode optimisation variables into the sampled robot path."""
         ax, ay = x[0], x[1]
         nin, e1, e2 = frame
-        u = nin + ax * e1 + ay * e2; u /= np.linalg.norm(u)
+        u = nin + ax * e1 + ay * e2; u /= np.sqrt(u @ u)
         Ls = self.robot["straight_entry_mm"]
         S = E + u * Ls
         free = x[2:].reshape(-1, 3)
-        pts, k = [S], 0
+        pts, k = [S[None]], 0
         for wp, nf in zip(waypoints, n_free):
-            pts += list(free[k:k + nf]); k += nf; pts.append(wp)
-        P = np.array(pts)
-        seg = np.linalg.norm(np.diff(P, axis=0), axis=1)
+            pts += [free[k:k + nf], np.asarray(wp, float)[None]]; k += nf
+        P = np.concatenate(pts)
+        seg = np.sqrt((np.diff(P, axis=0) ** 2).sum(1))
         if np.any(seg < 1e-3): seg = np.maximum(seg, 1e-3)
         s = np.concatenate([[0], np.cumsum(seg)])
         if not np.isfinite(s[-1]) or s[-1] > 5 * self.robot["max_length_mm"]: return None   # diverged
-        cs = CubicSpline(s, P, bc_type=((1, u), (2, np.zeros(3))))
         step = self.pl["sample_step_mm"]
         ss = np.linspace(0, s[-1], max(int(s[-1] / step) + 2, 4))
-        r, d1, d2 = cs(ss), cs(ss, 1), cs(ss, 2)
-        sp = np.linalg.norm(d1, axis=1)
-        kappa = np.linalg.norm(np.cross(d1, d2), axis=1) / np.maximum(sp, 1e-6) ** 3
+        r, d1, d2 = clamped_spline(s, P, u, ss)
+        sp = np.sqrt((d1 ** 2).sum(1))
+        cr = d1[:, [1, 2, 0]] * d2[:, [2, 0, 1]] - d1[:, [2, 0, 1]] * d2[:, [1, 2, 0]]   # cross product
+        kappa = np.sqrt((cr ** 2).sum(1)) / np.maximum(sp, 1e-6) ** 3
         straight = E + u[None] * np.linspace(0, Ls, max(int(Ls / step), 2))[:, None]
-        dl = np.linalg.norm(np.diff(r, axis=0), axis=1)
+        dl = np.sqrt((np.diff(r, axis=0) ** 2).sum(1))
         length = Ls + dl.sum()
         turn = np.sum(0.5 * (kappa[1:] + kappa[:-1]) * dl)
         return straight, r, kappa, dl, u, length, turn
@@ -171,8 +203,10 @@ class Planner:
         straight, r, kappa, dl, u, length, turn = sp
         tol = self.pl["target_tolerance_mm"]
         near = np.min(np.linalg.norm(r[:, None, :] - targets_mm[None], axis=2), axis=1) < tol
-        c_str_s, c_ign_s = p.C_strict(straight), p.C_ignorable(straight)
-        c_str, c_ign, c_out = p.C_strict(r), p.C_ignorable(r), p.C_outside(r)
+        ns = len(straight)
+        st, ig, ou, so = p.sample(np.vstack([straight, r]))         # one coordinate transform for all fields
+        c_str_s, c_ign_s, soft_s = st[:ns], ig[:ns], so[:ns]
+        c_str, c_ign, c_out, soft_r = st[ns:], ig[ns:], ou[ns:], so[ns:]
         inside = np.where(c_out > 0)[0]
         first_in = inside[0] if len(inside) else len(r)            # once inside the brain, stay inside
         c_out_eff = np.where(np.arange(len(r)) >= first_in, c_out, 1e3)
@@ -187,7 +221,7 @@ class Planner:
         lviol = max(0.0, length - rb["max_length_mm"]) ** 2
         turn_deg = np.degrees(turn)
         tviol = max(0.0, turn_deg - rb["max_total_turn_deg"]) ** 2
-        soft = np.sum(p.soft(r)[:-1] * dl) + np.sum(p.soft(straight)) * self.pl["sample_step_mm"]
+        soft = np.sum(soft_r[:-1] * dl) + np.sum(soft_s) * self.pl["sample_step_mm"]
         smooth = rb["min_bend_radius_mm"] ** 2 * np.sum(kappa[:-1] ** 2 * dl)  # prefers wide, sweeping curves
         cost = length + soft + self.pl.get("curvature_weight", 0.5) * smooth
         f = cost + w * (200.0 * viol + 500.0 * kviol + 5.0 * aviol + 2.0 * lviol + 1.0 * tviol)
@@ -195,8 +229,9 @@ class Planner:
         return dict(cost=cost, viol=viol, kappa_max=kappa.max(), angle=ang, length=length, turn=turn_deg,
                     points=np.vstack([straight, r[1:]]), min_c=min(c_eff.min(), c_ent.min()))
 
-    def plan_sequence(self, names, tips, n_entries=None):
-        """Best feasible path that reaches the given targets in this order (or the best infeasible attempt)."""
+    def plan_sequence(self, names, tips, n_entries=None, n_straight=2, first_feasible=False):
+        """Best feasible path that reaches the given targets in this order (or the best infeasible attempt).
+        first_feasible: stop at the first start that gives a feasible path (used for groups, to save time)."""
         tips = [np.asarray(t, float) for t in tips]
         m0, cum0 = self._mcp(names[0], tips[0])
         ec = cum0[tuple(self.entry_idx.T)]
@@ -214,17 +249,35 @@ class Planner:
             m, cum = self._mcp(names[a], tips[a])
             if not np.isfinite(cum[self.g_idx(tips[a - 1])]): return None
             legs.append(self._route(m, self.g_idx(tips[a - 1])))
-        starts = [(i, self._route(m0, self.entry_idx[i])) for i in chosen]
-        straight = self._straight_entries(tips[0], 2)                # straight lines are also good starting guesses
-        if len(tips) > 1:                                           # ... and continuing the line through the targets
-            straight = self._straight_entries(tips[0], 2, along=tips[0] - tips[1]) + straight
-        for i in straight:
+        starts = []
+        if len(tips) > 1 and np.linalg.norm(tips[0] - tips[1]) > 1e-6:   # continuing the line through the targets first
+            for i in self._straight_entries(tips[0], n_straight, along=tips[0] - tips[1]):
+                starts.append((i, self.entry_pts[i] + (tips[0] - self.entry_pts[i]) * np.linspace(0, 1, 40)[:, None]))
+        used = {i for i, _ in starts}
+        starts += [(i, self._route(m0, self.entry_idx[i])) for i in chosen]
+        for i in self._straight_entries(tips[0], n_straight):         # straight lines are also good starting guesses
+            if i in used: continue                                  # same straight line already tried
             starts.append((i, self.entry_pts[i] + (tips[0] - self.entry_pts[i]) * np.linspace(0, 1, 40)[:, None]))
-        best = None
+        best, self.last_alternatives = None, []
         for i, route0 in starts:
+            self._check_stop()
             res = self._optimise(names, tips, self.entry_pts[i], self.entry_n[i], [route0] + legs)
             if res and (best is None or (res.feasible, -res.cost) > (best.feasible, -best.cost)): best = res
+            if res and res.feasible: self.last_alternatives.append(res)
+            if first_feasible and best is not None and best.feasible: break
         return best
+
+    def alternatives(self, k=3, min_entry_gap_mm=15.0):
+        """Up to k feasible results of the last plan_sequence, cheapest first, with entries at least
+        min_entry_gap_mm apart (used when the best path collides with the path to another target)."""
+        out = []
+        for r in sorted(self.last_alternatives, key=lambda r: r.cost):
+            if all(np.linalg.norm(r.entry - o.entry) >= min_entry_gap_mm for o in out): out.append(r)
+            if len(out) >= k: break
+        return out
+
+    def _check_stop(self):
+        if self.should_stop(): raise Cancelled()
 
     def _straight_entries(self, tip, n, along=None):
         """Entries from which a straight line to the target is already safe (best = short + far from soft zones).
@@ -263,6 +316,35 @@ class Planner:
             self._dir_cache[key] = D[ok]
         return self._dir_cache[key]
 
+    def _arrival_dirs(self, tip):
+        """Unit vectors v such that the robot can arrive at tip coming from tip + v (8 mm chord collision-free,
+        with 1 mm tolerance for the bend of the real curve). Cached."""
+        key = tuple(np.round(tip, 2))
+        if not hasattr(self, "_arr_cache"): self._arr_cache = {}
+        if key not in self._arr_cache:
+            rng = np.random.default_rng(1); D = rng.normal(size=(6000, 3)); D /= np.linalg.norm(D, axis=1, keepdims=True)
+            t = np.linspace(self.pl["target_tolerance_mm"] + 0.5, 8.0, 12)
+            pts = tip[None, None] + D[:, None] * t[None, :, None]
+            ok = ((self.p.C_strict(pts) > -1.0) & (self.p.C_ignorable(pts) > -1.0)).all(1)   # may come from outside the brain
+            self._arr_cache[key] = D[ok]
+        return self._arr_cache[key]
+
+    def order_possible(self, a, b):
+        """Necessary condition for a path that passes target a and then reaches target b.
+        A curve that leaves a with tangent t and has curvature <= 1/R reaches a point at distance d only if the
+        angle between t and the chord a->b is <= asin(d / 2R) (the circular arc is the extreme case). The tangent
+        at a is the direction the robot arrives from, which must be collision-free (_arrival_dirs). 10 deg of
+        slack covers the chord approximation and the direction sampling."""
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        d = np.linalg.norm(b - a)
+        if d < 1e-6: return True
+        R = self.robot["min_bend_radius_mm"] / 1.03                 # the same tolerance as the final check
+        theta = np.degrees(np.arcsin(min(1.0, d / (2 * R)))) + 10.0
+        V = self._arrival_dirs(a)
+        if not len(V): return False
+        ang = np.degrees(np.arccos(np.clip((-V) @ ((b - a) / d), -1, 1)))
+        return bool(ang.min() <= theta)
+
     def _optimise(self, names, tips, E, nrm, routes):
         nin = -nrm
         a = np.cross(nin, [1, 0, 0]); a = a if np.linalg.norm(a) > 0.1 else np.cross(nin, [0, 1, 0])
@@ -295,13 +377,24 @@ class Planner:
         x0 = np.concatenate([x0, np.array(ctrl).ravel()])
         T = np.array(tips)
         x = x0
+        calls = [0]
+        def fun(x, w):
+            calls[0] += 1
+            if calls[0] % 200 == 0: self._check_stop()               # lets the Stop button interrupt an optimisation
+            return self._evaluate(x, E, frame, tips, n_free, T, w=w)
         try:                                                        # penalty continuation: soft first, then strict
             for w in (0.2, 1.0, 5.0, 25.0):
-                fun = lambda x, w=w: self._evaluate(x, E, frame, tips, n_free, T, w=w)
-                x = minimize(fun, x, method="L-BFGS-B", options=dict(maxiter=self.pl["optimizer_iterations"], eps=1e-3)).x
+                opt = minimize(fun, x, args=(w,), method="L-BFGS-B",
+                               options=dict(maxiter=self.pl["optimizer_iterations"], eps=1e-3))
+                x = opt.x
                 d = self._evaluate(x, E, frame, tips, n_free, T, detail=True)
                 if d is None: return None
                 if w >= 1.0 and not self._result(names, E, d).problems: break
+                # the line search could not move at all with this penalty weight: a heavier one starts from the
+                # same point and gets stuck the same way (measured on IXI057), so stop here and save the time
+                if w >= 1.0 and opt.nit == 0: break
+        except Cancelled:
+            raise
         except Exception as ex:
             self.log(f"    optimisation failed: {ex}"); return None
         return self._result(names, E, d)
@@ -352,6 +445,7 @@ class Planner:
     def plan_all(self, targets):
         """targets: {name: RAS mm}. Returns (chosen paths, names not reachable, all evaluated candidates)."""
         t0 = time.time()
+        limit = float(self.pl.get("time_limit_s", 120))
         P = {n: np.asarray(v, float) for n, v in targets.items()}
         self.target_problems = {}
         for n, v in P.items():
@@ -360,34 +454,140 @@ class Planner:
                 self.target_problems[n] = "target too close to " + ", ".join(f"{z} ({d} mm)" for z, d in bad)
                 self.log(f"  {n}: {self.target_problems[n]} - move it or use 'Snap to safe point'")
         names = [n for n in P if n not in self.target_problems]
-        cands = []
-        seqs = [(n,) for n in names]
-        kmax = int(self.pl["max_targets_per_path"])
-        for k in range(2, min(kmax, len(names)) + 1):
-            for perm in itertools.permutations(names, k):
-                if all(np.linalg.norm(P[perm[i]] - P[perm[i + 1]]) <= self.pl["group_max_distance_mm"] for i in range(k - 1)):
-                    seqs.append(perm)
-        feasible_pairs = set()
-        for j, seq in enumerate(seqs):
-            if len(seq) == 3 and not ((seq[0], seq[1]) in feasible_pairs and (seq[1], seq[2]) in feasible_pairs): continue
-            self.progress(j / len(seqs), f"planning {' -> '.join(seq)}")
-            res = self.plan_sequence(seq, [P[n] for n in seq])
-            if res is None: continue
-            self.log(f"  {' -> '.join(seq)}: {'OK' if res.feasible else 'rejected: ' + '; '.join(res.problems)}"
-                     f" (length {res.length_mm:.0f} mm, min radius {res.min_radius_mm:.0f} mm)")
-            cands.append(res)
-            if res.feasible and len(seq) == 2: feasible_pairs.add(seq)
+        self.progress(0.0, "preparing the route search")
+        groups = self._candidate_groups(names, P)
+        n_jobs, done = max(len(names) + len(groups), 1), 0
+        cands, single = [], {}
+
+        # 1. every target alone (always planned, full search)
+        for n in names:
+            self._check_stop()
+            self.progress(done / n_jobs, f"planning {n}  ({time.time() - t0:.0f} s)")
+            res = self.plan_sequence((n,), [P[n]])
+            done += 1
+            if res is None: self.log(f"  {n}: no route to the skin"); continue
+            self._log_result((n,), res)
+            if res.feasible:
+                single[n] = res
+                cands += self.alternatives()                        # best path + other entries, in case of collisions
+            else: cands.append(res)
+
+        # 2. groups of 2-3 targets on one path, most promising first, within the time limit
+        ins, skipped_time, pruned, stopped = self.pl["insertion_cost_mm"], 0, 0, False
+        for gi, (members, orders) in enumerate(groups):
+            done = len(names) + gi
+            if self.should_stop(): stopped = True; break
+            pairs_ok = len(members) == 2 or all(frozenset(pq) in self._feasible_sets(cands)
+                                                for pq in itertools.combinations(members, 2))
+            if not pairs_ok: continue                               # a triple only makes sense if its pairs work
+            if time.time() - t0 > limit: skipped_time += 1; continue
+            if self._cannot_win(members, orders, P, cands, single, ins): pruned += 1; continue
+            try:
+                for seq in orders:                                  # cheapest coarse route first
+                    if time.time() - t0 > limit: break
+                    self.progress(done / n_jobs, f"planning {' -> '.join(seq)}  ({time.time() - t0:.0f} s)")
+                    res = self.plan_sequence(seq, [P[n] for n in seq], first_feasible=True)
+                    if res is None: continue
+                    self._log_result(seq, res); cands.append(res)
+                    if res.feasible: break                          # other orders of the same targets are not tried
+            except Cancelled:
+                stopped = True; break
+        if stopped: self.log("  stopped by the user - using the paths found so far")
+        if pruned: self.log(f"  {pruned} group(s) skipped: they cannot be shorter than separate paths")
+        if skipped_time:
+            self.log(f"  time limit {limit:.0f} s reached: {skipped_time} group(s) not tried "
+                     f"(raise time_limit_s in robot.toml to try them)")
         chosen, uncovered = self._select(names, [c for c in cands if c.feasible])
         uncovered = list(self.target_problems) + uncovered
+        for n, why in self.collision_notes.items():
+            self.target_problems[n] = why; self.log(f"  {n}: not used - {why}")
         self.progress(1.0, f"done in {time.time() - t0:.0f} s")
         return chosen, uncovered, cands
 
+    def _log_result(self, seq, res):
+        self.log(f"  {' -> '.join(seq)}: {'OK' if res.feasible else 'rejected: ' + '; '.join(res.problems)}"
+                 f" (length {res.length_mm:.0f} mm, min radius {res.min_radius_mm:.0f} mm)")
+
+    @staticmethod
+    def _feasible_sets(cands):
+        return {frozenset(c.targets) for c in cands if c.feasible}
+
+    def _coarse_cost(self, seq, P):
+        """Cost of the coarse grid routes skin -> seq[0] -> seq[1] ... (inf if a leg has no route)."""
+        _, cum0 = self._mcp(seq[0], P[seq[0]])
+        c = float(np.min(cum0[tuple(self.entry_idx.T)])) if len(self.entry_idx) else np.inf
+        for a in range(1, len(seq)):
+            _, cum = self._mcp(seq[a], P[seq[a]])
+            c += float(cum[self.g_idx(P[seq[a - 1]])])
+        return c
+
+    def _candidate_groups(self, names, P):
+        """[(members, orders sorted by coarse cost)], groups sorted by their best coarse cost."""
+        kmax, dmax = int(self.pl["max_targets_per_path"]), self.pl["group_max_distance_mm"]
+        out = []
+        for k in range(2, min(kmax, len(names)) + 1):
+            for members in itertools.combinations(names, k):
+                orders = [seq for seq in itertools.permutations(members)
+                          if all(np.linalg.norm(P[seq[i]] - P[seq[i + 1]]) <= dmax and
+                                 self.order_possible(P[seq[i]], P[seq[i + 1]]) for i in range(k - 1))]
+                if not orders: continue
+                costs = [self._coarse_cost(seq, P) for seq in orders]
+                orders = [o for _, o in sorted(zip(costs, orders), key=lambda t: t[0])]
+                out.append((members, orders, k, min(costs)))
+        out.sort(key=lambda g: (g[2], g[3]))                          # pairs before triples, then by promise
+        return [(m, o) for m, o, _, _ in out]
+
+    def _cannot_win(self, members, orders, P, cands, single, ins):
+        """True if any path through these targets is provably at least as expensive as covering them with paths
+        already found (path cost >= path length >= distance from the nearest allowed entry + target-to-target)."""
+        if not all(n in single for n in members): return False
+        best_cover = sum(single[n].cost for n in members) + ins * len(members)
+        for c in cands:                                             # e.g. a pair + the third target alone
+            if c.feasible and 1 < len(c.targets) < len(members) and set(c.targets) <= set(members):
+                rest = [n for n in members if n not in c.targets]
+                best_cover = min(best_cover, c.cost + ins + sum(single[n].cost + ins for n in rest))
+        lb = min(float(np.min(np.linalg.norm(self.entry_pts - P[seq[0]], axis=1))) +
+                 sum(np.linalg.norm(P[seq[i]] - P[seq[i + 1]]) for i in range(len(seq) - 1)) for seq in orders)
+        return lb + ins >= best_cover
+
+    def conflicts(self, feas):
+        """Pairs (i, j) of paths that must not be used together: their bodies come closer than
+        min_path_distance_mm, or their skin entries are closer than min_entry_distance_mm."""
+        from scipy.spatial import cKDTree
+        gap = self.robot["diameter_mm"] + float(self.pl.get("min_path_distance_mm", 2.0))
+        egap = float(self.pl.get("min_entry_distance_mm", 10.0))
+        trees = [cKDTree(c.points) for c in feas]
+        out = []
+        for i, j in itertools.combinations(range(len(feas)), 2):
+            a, b = feas[i], feas[j]
+            if set(a.targets) & set(b.targets): out.append((i, j)); continue   # same target twice: never both
+            d = trees[i].query(b.points, k=1)[0].min()
+            if d < gap or np.linalg.norm(a.entry - b.entry) < egap: out.append((i, j))
+        return out
+
     def _select(self, names, feas):
+        """Cheapest set of non-colliding paths that reaches as many targets as possible."""
         from scipy.optimize import milp, LinearConstraint, Bounds
-        if not feas: return [], names
+        self.collision_notes = {}
+        if not feas: return [], list(names)
+        nc, nt = len(feas), len(names)
         A = np.array([[1.0 if n in c.targets else 0.0 for c in feas] for n in names])
-        cover = A.sum(1) > 0
-        cost = np.array([c.cost + self.pl["insertion_cost_mm"] for c in feas])
-        res = milp(cost, constraints=LinearConstraint(A[cover], lb=1, ub=np.inf), integrality=np.ones(len(feas)), bounds=Bounds(0, 1))
-        chosen = [c for c, x in zip(feas, res.x) if x > 0.5] if res.success else []
-        return chosen, [n for n, cv in zip(names, cover) if not cv]
+        big = 1e6                                                   # cost of leaving a target without a path
+        cost = np.concatenate([[c.cost + self.pl["insertion_cost_mm"] for c in feas], np.full(nt, big)])
+        rows, lb, ub = [np.hstack([A, np.eye(nt)])], [np.ones(nt)], [np.full(nt, np.inf)]   # path or "not reached"
+        conf = self.conflicts(feas)
+        if conf:
+            C = np.zeros((len(conf), nc + nt))
+            for r, (i, j) in enumerate(conf): C[r, i] = C[r, j] = 1.0
+            rows.append(C); lb.append(np.zeros(len(conf))); ub.append(np.ones(len(conf)))
+        res = milp(cost, constraints=LinearConstraint(np.vstack(rows), np.concatenate(lb), np.concatenate(ub)),
+                   integrality=np.ones(nc + nt), bounds=Bounds(0, 1))
+        if not res.success: return [], list(names)
+        chosen = [c for c, x in zip(feas, res.x[:nc]) if x > 0.5]
+        covered = {n for c in chosen for n in c.targets}
+        uncovered = [n for n in names if n not in covered]
+        # explain targets lost to collisions (they had a path, but it clashes with a chosen one)
+        for n in uncovered:
+            if A[names.index(n)].any():
+                self.collision_notes[n] = "its paths come too close to another chosen path"
+        return chosen, uncovered

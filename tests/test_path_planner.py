@@ -47,4 +47,46 @@ with tempfile.TemporaryDirectory() as d:
     chosen, unc, _ = pl.plan_all({"inside artery": [0.0, 10.0, 15.0]})
     print(f"3. target inside an artery -> not planned, reported: {unc} ({pl.target_problems})")
     assert unc == ["inside artery"] and not chosen
+
+    # 4. Stop button: planning raises Cancelled during the single paths ...
+    pl.should_stop = lambda: True
+    try: pl.plan_all({"A": [-20.0, -15.0, 0.0]}); raise AssertionError("not stopped")
+    except planner.Cancelled: pass
+    # ... and keeps the single paths if it is stopped while trying groups
+    flag = {"stop": False}
+    pl.progress = lambda f, msg="": flag.update(stop=flag["stop"] or "->" in msg)   # first group starts -> press Stop
+    pl.should_stop = lambda: flag["stop"]
+    chosen, unc, _ = pl.plan_all({"A": [-20.0, -15.0, 0.0], "B": [-20.0, -15.0, -20.0], "C": [20.0, -15.0, 0.0]})
+    print(f"4. stopped during groups -> {len(chosen)} path(s), not reached: {unc}")
+    assert chosen and all(c.feasible for c in chosen)
+    pl.should_stop, pl.progress = (lambda: False), (lambda f, msg="": None)
+
+    # 5. time limit 0 s: every target alone is still planned, no group is tried
+    pl.pl = dict(pl.pl, time_limit_s=0)
+    chosen, unc, cands = pl.plan_all({"A": [-20.0, -15.0, 0.0], "B": [-20.0, -15.0, -20.0]})
+    print(f"5. time limit 0 s -> candidates {[c.targets for c in cands]}")
+    assert all(len(c.targets) == 1 for c in cands) and len(chosen) == 2 and not unc
+
+    # 6. collisions between paths: the two cheapest paths cross, so the selection must use the alternative
+    def line(a, b, targets, cost):
+        a, b = np.array(a, float), np.array(b, float)
+        pts = a + (b - a) * np.linspace(0, 1, 60)[:, None]
+        return planner.PathResult(targets, a, pts, True, cost, 0, 1e9, 0, 0)
+    P1 = line([-40, 0, 20], [10, 0, 0], ["P"], 50)               # P and Q cross at (0, 0, 4)
+    Q1 = line([40, 0, 20], [-10, 0, 0], ["Q"], 50)
+    Q2 = line([40, 40, 20], [-10, 0, 0], ["Q"], 60)              # a bit longer, but far from P1 at the crossing
+    print(f"6. conflicts {pl.conflicts([P1, Q1, Q2])}")
+    chosen, unc = pl._select(["P", "Q"], [P1, Q1, Q2])
+    print(f"   chosen {[(c.targets, c.cost) for c in chosen]}, not reached {unc}")
+    assert (0, 1) in pl.conflicts([P1, Q1, Q2]) and sorted(c.cost for c in chosen) == [50, 60] and not unc
+    chosen, unc = pl._select(["P", "Q"], [P1, Q1])              # no alternative: one target is reported
+    assert len(chosen) == 1 and len(unc) == 1 and unc[0] in pl.collision_notes
+
+    # 7. midline no-go zone: a line from the left to the right hemisphere is blocked, a left-only line is not
+    cfg7 = dict(cfg, no_go=dict(cfg["no_go"], midline={"computed": "midline", "margin_mm": 1.0}))
+    pt7 = patient.Patient(d, cfg7, log=lambda *a: None)
+    cross = np.array([[-20.0, 10.0, 0.0]]) + np.array([[1.0, 0, 0]]) * np.linspace(0, 40, 81)[:, None]
+    left = np.array([[-30.0, 10.0, 0.0]]) + np.array([[1.0, 0, 0]]) * np.linspace(0, 20, 41)[:, None]
+    print(f"7. midline zone: crossing line min clearance {pt7.C_strict(cross).min():.1f} mm, left-only line {pt7.C_strict(left).min():.1f} mm")
+    assert pt7.C_strict(cross).min() < 0 < pt7.C_strict(left).min()
 print("OK")

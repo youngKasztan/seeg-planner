@@ -83,10 +83,24 @@ class Patient:
         f = ndimage.affine_transform(data.astype(np.float32), M[:3, :3], M[:3, 3], output_shape=out_shape, order=1, mode="constant")
         return f
 
+    LEFT = [2, 4, 5, 7, 8, 10, 11, 12, 13, 17, 18, 26, 28, 30, 31] + list(range(1000, 1036))
+    RIGHT = [41, 43, 44, 46, 47, 49, 50, 51, 52, 53, 54, 58, 60, 62, 63] + list(range(2000, 2036))
+
+    def midline(self):
+        """Surface between the hemispheres (falx, interhemispheric fissure, midline of the corpus callosum and
+        3rd ventricle): voxels about equally far from left- and right-hemisphere labels, inside the head.
+        A robot never crosses it - each path stays in the hemisphere it enters."""
+        if getattr(self, "_midline", None) is None:
+            dl = ndimage.distance_transform_edt(~np.isin(self.labels, self.LEFT), sampling=self.vox)
+            dr = ndimage.distance_transform_edt(~np.isin(self.labels, self.RIGHT), sampling=self.vox)
+            self._midline = (np.abs(dl - dr) <= self.vox.max()) & (np.minimum(dl, dr) < 15.0) & self.head
+        return self._midline
+
     def _mask_from(self, spec, name):
-        """Binary mask for a zone spec: labels, mask files, or outside_of a mask."""
+        """Binary mask for a zone spec: labels, mask files, a computed surface, or outside_of a mask."""
         m = np.zeros(self.shape, bool); ok = False
         if "labels" in spec: m |= np.isin(self.labels, spec["labels"]); ok = True
+        if spec.get("computed") == "midline": m |= self.midline(); ok = True
         for f in spec.get("mask", []):
             p = os.path.join(self.folder, f)
             if not os.path.exists(p): self.warnings.append(f"{name}: {f} not found - zone skipped"); continue
@@ -130,6 +144,21 @@ class Patient:
             if "outside_of" not in cfg["no_go"][n]: self.nogo_union |= m
         self.soft_union = np.zeros(self.shape, bool)
         for m in self.soft_masks.values(): self.soft_union |= m
+
+    def sample(self, pts):
+        """C_strict, C_ignorable, C_outside and soft at pts (N x 3, RAS mm) with one coordinate transform
+        (all four fields share the planning grid). Same values as calling the fields one by one."""
+        ijk = nib.affines.apply_affine(self.C_strict.inv, np.asarray(pts, float)).T
+        return [ndimage.map_coordinates(f.data, ijk, order=1, mode="constant", cval=f.outside)
+                for f in (self.C_strict, self.C_ignorable, self.C_outside, self.soft)]
+
+    def display_mask(self, key, src):
+        """Mask of a display layer (cached); None if its file is missing."""
+        if not hasattr(self, "_display"): self._display = {}
+        if key not in self._display:
+            if key == "scalp": self._display[key] = self.head & ~ndimage.binary_erosion(self.head, iterations=2)
+            else: self._display[key] = self._mask_from(src, key)
+        return self._display[key]
 
     # ------------------------------------------------------------------ coordinates
     def vox_to_mm(self, ijk): return nib.affines.apply_affine(self.affine, np.asarray(ijk, float))

@@ -13,11 +13,14 @@ The headset only displays the result (brain + paths); all planning happens here.
    **left click** adds a target on the current slice, **right click** moves the cursor. Targets can be on
    different slices. Double click a target to rename it. A target that is itself inside a no-go zone is shown
    in red; *Snap to safe point* moves it to the closest safe point (max 5 mm).
-   **Layers** (right panel, tick to show on the slices and in 3D):
+   **Layers** (right panel, tick to show on the slices and in 3D; the planner always uses every zone,
+   ticked or not). One tick per group shows or hides the whole group; expand a group to tick single layers.
+   All no-go zones are shown at start (except *outside_brain*, which would cover the whole head).
    - *No-go zones* and *Soft zones* = exactly the zones the planner uses (from `robot.toml`), with their margins / weights
-   - *Anatomy, Eloquent cortex, White-matter tracts, Vessels, Head* = the same layers as the headset model
-     (display only, they do not change the plan); [PRIOR] / [ESTIMATE] / [atlas function] mark layers that are
-     not measured in this patient
+   - *Anatomy, Head* = display only (they do not change the plan): grey / white matter, CSF, hippocampus,
+     amygdala, thalamus, basal ganglia, skull estimate, scalp. Structures that are already a zone
+     (ventricles, vessels, eloquent cortex, tracts ...) are shown from their zone row, not twice.
+     [PRIOR] / [ESTIMATE] / [atlas function] mark layers that are not measured in this patient
 3. **Plan paths** - for every target, and for groups of 2-3 nearby targets, the planner looks for a path;
    it then decides itself how many insertions are needed (one path through several targets when that is safe).
    Every target alone takes ~10-20 s. Groups are tried after that, most promising first, until

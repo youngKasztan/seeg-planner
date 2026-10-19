@@ -148,6 +148,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.targets, self.paths, self.uncovered, self.cursor = {}, [], [], np.zeros(3, int)
         self.layer_items, self.layer_meshes = {}, {}               # key -> (tree item, mask getter, colour, alpha)
         self.worker = None
+        self._pending_layers = set()
+        self._layer_timer = QtCore.QTimer(self); self._layer_timer.setSingleShot(True); self._layer_timer.setInterval(0)
+        self._layer_timer.timeout.connect(self._apply_layer_changes)
         self._build_ui()
         self._log(f"Robot config: {self.cfg['_path']}")
         if folder: QtCore.QTimer.singleShot(100, lambda: self.open_folder(folder))
@@ -289,9 +292,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ltree.blockSignals(True); self.ltree.clear(); self.layer_items = {}
         def swatch(col):
             pm = QtGui.QPixmap(12, 12); pm.fill(QtGui.QColor.fromRgbF(*col)); return QtGui.QIcon(pm)
+        groups = []
         def group(title, tip):
-            g = QtWidgets.QTreeWidgetItem(self.ltree, [title]); g.setToolTip(0, tip)
-            f = g.font(0); f.setBold(True); g.setFont(0, f); g.setExpanded(True); return g
+            # one tick per group (shows / hides all its layers); expand the group to tick single layers
+            g = QtWidgets.QTreeWidgetItem(self.ltree, [title]); g.setToolTip(0, tip + "\nTick = show all; expand to choose single layers")
+            g.setFlags(g.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsAutoTristate)
+            f = g.font(0); f.setBold(True); g.setFont(0, f); groups.append((g, title)); return g
         def add(parent, key, text, getter, col, alpha, checked, tip=""):
             it = QtWidgets.QTreeWidgetItem(parent, [text]); it.setIcon(0, swatch(col)); it.setToolTip(0, tip)
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
@@ -304,7 +310,8 @@ class MainWindow(QtWidgets.QMainWindow):
             out = "outside_of" in z
             text = (f"{n}  (whole head outside the brain, margin {z['margin_mm']} mm)" if out else
                     f"{n}  (margin {z['margin_mm']} mm{', ignored near targets' if z.get('ignore_near_targets') else ''}){tag(n)}")
-            add(g, "nogo:" + n, text, (lambda n=n: p.zone_masks[n]), layers.zone_colour(n), 0.25 if out else 0.5, not out)
+            add(g, "nogo:" + n, text, (lambda n=n: p.zone_masks[n]), layers.zone_colour(n), 0.25 if out else 0.5,
+                not out)                                            # all no-go zones on at start (outside_brain would cover the head)
         g = group("Soft zones (allowed, planner keeps away)", "From robot.toml [avoid]: cost = weight * exp(-distance / scale)")
         for n, z in cfg.get("avoid", {}).items():
             if n not in p.soft_masks: continue
@@ -312,12 +319,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 layers.zone_colour(n, (1.0, 0.85, 0.1)), 0.35, False)
         for grp in layers.GROUPS:
             items = [L for L in layers.CATALOG if L[1] == grp]
-            g = group(grp + "  (display only)", "Same layers as the headset model; they do not change the plan")
+            g = group(grp + "  (display only)", "Display only; they do not change the plan")
             for key, _, src, col, origin in items:
                 if "mask" in src and not all(os.path.exists(os.path.join(p.folder, f)) for f in src["mask"]): continue
                 o = "" if origin == "patient" else f" [{origin}]"
                 add(g, "layer:" + key, key + o, (lambda src=src, key=key: p.display_mask(key, src)), col, 0.4, False,
                     f"source: {', '.join(src['mask']) if 'mask' in src else 'segmentation labels'}")
+        for g, title in groups:                                     # collapsed, with the number of layers in the title
+            if g.childCount() == 0: self.ltree.invisibleRootItem().removeChild(g); continue
+            g.setText(0, f"{title}  [{g.childCount()}]"); g.setExpanded(False)
         self.ltree.blockSignals(False)
 
     def visible_layers(self):
@@ -329,9 +339,15 @@ class MainWindow(QtWidgets.QMainWindow):
         return out
 
     def _layer_toggled(self, item, col):
+        """A group tick changes all its layers at once: collect them and redraw once."""
         key = next((k for k, v in self.layer_items.items() if v[0] is item), None)
-        if key is None: return
-        self.redraw(); self._update_3d_layer(key)
+        if key is None: return                                      # a group row: its layers report themselves
+        self._pending_layers.add(key); self._layer_timer.start()
+
+    def _apply_layer_changes(self):
+        keys, self._pending_layers = self._pending_layers, set()
+        self.redraw()
+        for key in keys: self._update_3d_layer(key)
 
     def reload_config(self):
         try: self.cfg = config.load(self.cfg["_path"])

@@ -17,12 +17,15 @@ Not yet run inside Unity / on a headset.
    - LandmarkRegistration -> Loader: drag `Patient` onto it
    - DesktopViewer -> Loader and Registration: drag `Patient` onto both
 5. Press **Play**. Mouse: left drag rotate, right drag pan, wheel zoom.
-   The panel switches layers (origin shown as [PRIOR] / [ESTIMATE]), shows the 5 landmarks, and
+   Zoom: wheel or the Zoom slider (- / + / Reset) at the top of the panel.
+   The panel switches layers in the same groups as the planner app (No-go zones, Soft zones, Anatomy, Head:
+   tick a group to show all of it, > to choose single layers; origin shown as [PRIOR] / [ESTIMATE]),
+   switches the robot paths on/off, shows the landmarks, and
    **Simulate registration** places a virtual head at a random pose, "touches" the landmarks with ~2 mm noise
    and reports FRE + target error at the hippocampus - the same code path the headset uses.
    **Edit landmarks**: choose a landmark, click on the skin to move it; it is saved to `headset_manifest.json`.
-6. Robot paths: plan them in `path_planner/app.py` and press *Export to headset*; `paths.glb` in the same folder
-   is loaded automatically and shown inside the brain.
+6. Robot paths: plan them in `path_planner/app.py` and press *Export to headset*; `paths.glb` and the brain model
+   with the planner's layers (`patient_scene.glb`) are written to the same folder and loaded on the next Play.
 
 
 ## Headset setup (Quest 3)

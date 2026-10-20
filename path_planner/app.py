@@ -466,6 +466,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rlist.addTopLevelItem(it)
         for c in range(4): self.rlist.resizeColumnToContents(c)
 
+    def headset_layers(self):
+        """The app's layers for the headset model, in the order and groups of the layer list:
+        [(name, group, mask, colour, visible at start, origin)]. outside_brain is left out (it is the whole head)."""
+        import headset_scene
+        p = self.patient
+        out = [("brain", "Anatomy", p.brain, (0.85, 0.7, 0.7), True, "patient")]
+        for key, (it, getter, col, alpha) in self.layer_items.items():
+            kind, name = key.split(":", 1)
+            if key.startswith("nogo:outside"): continue
+            m = getter()
+            if m is None or not m.any(): continue
+            group = "Head" if name in headset_scene.HEAD_LAYERS else headset_scene.GROUPS[kind]
+            spec = (self.cfg.get("no_go", {}).get(name) or self.cfg.get("avoid", {}).get(name) or {}) if kind != "layer" else {}
+            files = " ".join(spec.get("mask", []))
+            origin = ("prior" if ("prior" in name or "prior" in files) else "atlas function" if "eloquent" in name
+                      else "estimate" if name == "skull_t1" else "patient")
+            out.append((name, group, m, tuple(col), kind == "nogo", origin))
+        return out
+
     def export(self):
         if not self.paths: self._log("nothing to export - plan first"); return
         man = self.patient.headset_manifest
@@ -473,10 +492,21 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, APP_NAME, "No headset/headset_manifest.json in the patient folder.\n"
                                           "Run tools/export_headset.py first."); return
         centre = np.array(man["coordinate_system"]["head_centre_ras_mm"])
-        path = export.export(self.patient.headset_dir, self.paths, self.targets, self.cfg, centre,
-                             self.uncovered, getattr(self.planner, "target_problems", {}))
+        p, paths, targets, cfg = self.patient, list(self.paths), dict(self.targets), self.cfg
+        uncovered, problems = list(self.uncovered), dict(getattr(self.planner, "target_problems", {}))
+        layers = self.headset_layers()
         self.save_targets()
-        self._log(f"Exported {len(self.paths)} path(s): {path} and paths.glb - copy the headset folder to the glasses")
+        self._log(f"Exporting {len(paths)} path(s) and the brain model with {len(layers)} layers ... (about 1 min)")
+        def job(log, progress):
+            import headset_scene
+            progress(0.1, "writing plan.json and paths.glb")
+            path = export.export(p.headset_dir, paths, targets, cfg, centre, uncovered, problems)
+            progress(0.3, "building the brain model for the headset")
+            headset_scene.export_scene(p.headset_dir, p, layers, log=log)
+            progress(1.0, "export done")
+            return path
+        self._run(job, lambda path: self._log(f"Exported to {os.path.dirname(path)}: plan.json, paths.glb, "
+                                              f"patient_scene.glb (same layers as here) - press Play in Unity"))
 
     # ------------------------------------------------------------------ drawing
     def set_cursor(self, c):

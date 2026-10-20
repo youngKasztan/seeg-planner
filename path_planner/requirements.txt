@@ -3,6 +3,7 @@ scipy
 nibabel
 scikit-image
 trimesh
+fast_simplification
 matplotlib
 PySide6
 pyqtgraph

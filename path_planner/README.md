@@ -26,8 +26,14 @@ The headset only displays the result (brain + paths); all planning happens here.
    Every target alone takes ~10-20 s. Groups are tried after that, most promising first, until
    `time_limit_s` (robot.toml, default 120 s); groups that cannot be shorter than separate paths are skipped.
    **Stop** ends the planning at any time; if the single paths are already done they are kept.
-4. **Export to headset** - writes `plan.json` and `paths.glb` into `headset/`; the Unity app (`PatientLoader`)
-   loads `paths.glb` automatically. Copy the headset folder to the glasses as before.
+4. **Export to headset** - writes into `headset/` (about 1 min):
+   - `plan.json` (targets, path points in mm and in headset metres, checks) and `paths.glb` (robot tubes + targets)
+   - `patient_scene.glb` / `patient_scene_lite.glb` and the `layers` of `headset_manifest.json`: the brain model with
+     **the same layers and groups as this app** (No-go zones, Soft zones, Anatomy, Head; outside_brain left out).
+     The original model of `tools/export_headset.py` is kept once as `*_pipeline.glb` / `headset_manifest_pipeline.json`;
+     landmarks and the coordinate system in the manifest are not changed.
+   The Unity app (`PatientLoader` + `DesktopViewer`) loads all of it on Play: same groups, one tick per group.
+   Copy the headset folder to the glasses as before.
 
 ## Robot constraints and no-go zones: `robot.toml`
 All limits are in `robot.toml` (next to the exe after building): robot diameter, minimum bend radius,

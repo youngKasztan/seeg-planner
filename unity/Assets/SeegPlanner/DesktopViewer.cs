@@ -1,6 +1,7 @@
 // DesktopViewer.cs - look at the patient model on a laptop, without a headset (Play mode in the Unity Editor).
 //   left mouse drag = rotate, right drag = pan, wheel or the Zoom slider = zoom
-//   panel on the left: switch layers on/off (grouped by category, origin shown: patient / PRIOR / ESTIMATE),
+//   panel on the left: switch layers on/off in the same groups as the planner app (No-go zones, Soft zones,
+//   Anatomy, Head; origin shown: patient / PRIOR / ESTIMATE / atlas function), robot paths on/off,
 //   show the 5 alignment landmarks, and run a SIMULATED registration: a virtual head is placed at a random pose,
 //   the 5 landmarks are "touched" with ~2 mm noise, and LandmarkRegistration moves the hologram onto it.
 //   The panel then shows FRE and the target error at the left hippocampus.
@@ -36,6 +37,17 @@ namespace SeegPlanner
         string editing;
         Vector2 pressPos;
         readonly Dictionary<string, GameObject> markerByName = new();
+
+        // layer groups as in the planner app: No-go zones, Soft zones, Anatomy, Head (from headset_manifest.json 'group';
+        // older manifests without 'group' are grouped by their 'category')
+        static readonly string[] PreferredOrder = { "No-go zones", "Soft zones", "Anatomy", "Head" };
+        readonly List<string> groupOrder = new();
+        readonly Dictionary<string, List<string>> groupItems = new();
+        readonly Dictionary<string, bool> expanded = new();
+        readonly Dictionary<string, string> originOf = new();
+        readonly List<GameObject> pathObjects = new();
+        bool showPaths = true;
+        GUIStyle boldToggle;
 
         static Color LmColor(string n) =>
             n.Contains("inner_eye") ? Color.green : n.Contains("outer_eye") ? Color.yellow :
@@ -100,6 +112,25 @@ namespace SeegPlanner
                     if (mf.sharedMesh != null && mf.sharedMesh.isReadable && mf.GetComponent<MeshCollider>() == null)
                         mf.gameObject.AddComponent<MeshCollider>().sharedMesh = mf.sharedMesh;
             foreach (JObject L in loader.Manifest["layers"]) visible[(string)L["name"]] = (bool)L["visible"];
+            BuildGroups();
+        }
+
+        void BuildGroups()
+        {
+            var firstSeen = new Dictionary<string, int>();
+            foreach (JObject L in loader.Manifest["layers"])
+            {
+                string n = (string)L["name"];
+                string g = (string)(L["group"] ?? L["category"]) ?? "Other";
+                if (!groupItems.ContainsKey(g)) { groupItems[g] = new List<string>(); groupOrder.Add(g); expanded[g] = false; firstSeen[g] = firstSeen.Count; }
+                groupItems[g].Add(n);
+                originOf[n] = (string)L["origin"] ?? "";
+            }
+            System.Func<string, int> rank = grp => { int i = System.Array.IndexOf(PreferredOrder, grp); return i >= 0 ? i : 100 + firstSeen[grp]; };
+            groupOrder.Sort((a, b) => rank(a).CompareTo(rank(b)));
+            // robot paths and targets from paths.glb (path_1, path_2 ..., target_<name>)
+            foreach (var kv in loader.Layers)
+                if (kv.Key.StartsWith("path_") || kv.Key.StartsWith("target_")) pathObjects.Add(kv.Value);
         }
 
         void PlaceLandmark(Vector2 screenPos)
@@ -123,7 +154,7 @@ namespace SeegPlanner
 
         static string OriginTag(string origin) =>
             origin.StartsWith("prior") ? "  [PRIOR]" : origin.StartsWith("estimate") ? "  [ESTIMATE]" :
-            origin.StartsWith("patient anatomy") ? "  [atlas function]" : "";
+            origin.StartsWith("patient anatomy") || origin.StartsWith("atlas") ? "  [atlas function]" : "";
 
         void SimulateRegistration()
         {
@@ -165,18 +196,38 @@ namespace SeegPlanner
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Default")) SetAll(L => (bool)L["visible"]);
             if (GUILayout.Button("All")) SetAll(L => true);
-            if (GUILayout.Button("Critical")) SetAll(L => (string)L["category"] == "critical" || (string)L["category"] == "target");
-            if (GUILayout.Button("Tracts")) SetAll(L => (string)L["category"] == "tract" || (string)L["name"] == "ventricles");
+            if (GUILayout.Button("None")) SetAll(L => false);
             GUILayout.EndHorizontal();
+            GUILayout.Label("Layers: tick a group to show all of it, > to choose single layers");
 
-            scroll = GUILayout.BeginScrollView(scroll, GUILayout.Height(Mathf.Max(150f, Screen.height - (editMode ? 640f : 360f))));
-            string lastCat = null;
-            foreach (JObject L in loader.Manifest["layers"])
+            if (boldToggle == null) boldToggle = new GUIStyle(GUI.skin.toggle) { richText = true };
+            scroll = GUILayout.BeginScrollView(scroll, GUILayout.Height(Mathf.Max(150f, Screen.height - (editMode ? 660f : 380f))));
+            foreach (string g in groupOrder)
             {
-                string n = (string)L["name"], cat = (string)L["category"];
-                if (cat != lastCat) { GUILayout.Label("<b>" + cat.ToUpper() + "</b>", new GUIStyle(GUI.skin.label) { richText = true }); lastCat = cat; }
-                bool v = GUILayout.Toggle(visible[n], $" {n}{OriginTag((string)L["origin"])}");
-                if (v != visible[n]) { visible[n] = v; loader.SetLayerVisible(n, v); }
+                var items = groupItems[g];
+                int on = 0; foreach (string n in items) if (visible[n]) on++;
+                bool all = on == items.Count;
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button(expanded[g] ? "v" : ">", GUILayout.Width(22))) expanded[g] = !expanded[g];
+                string part = on > 0 && !all ? $"  ({on} shown)" : "";
+                bool gv = GUILayout.Toggle(all, $" <b>{g}</b>  [{items.Count}]{part}", boldToggle);
+                if (gv != all) foreach (string n in items) { visible[n] = gv; loader.SetLayerVisible(n, gv); }
+                GUILayout.EndHorizontal();
+                if (!expanded[g]) continue;
+                foreach (string n in items)
+                {
+                    GUILayout.BeginHorizontal(); GUILayout.Space(30);
+                    bool v = GUILayout.Toggle(visible[n], $" {n}{OriginTag(originOf[n])}");
+                    if (v != visible[n]) { visible[n] = v; loader.SetLayerVisible(n, v); }
+                    GUILayout.EndHorizontal();
+                }
+            }
+            if (pathObjects.Count > 0)
+            {
+                GUILayout.BeginHorizontal(); GUILayout.Space(26);
+                bool pv = GUILayout.Toggle(showPaths, " <b>Robot paths and targets</b>", boldToggle);
+                if (pv != showPaths) { showPaths = pv; foreach (var o in pathObjects) o.SetActive(pv); }
+                GUILayout.EndHorizontal();
             }
             GUILayout.EndScrollView();
 

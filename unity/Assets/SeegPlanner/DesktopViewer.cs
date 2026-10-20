@@ -1,5 +1,5 @@
 // DesktopViewer.cs - look at the patient model on a laptop, without a headset (Play mode in the Unity Editor).
-//   left mouse drag = rotate, right drag = pan, wheel = zoom
+//   left mouse drag = rotate, right drag = pan, wheel or the Zoom slider = zoom
 //   panel on the left: switch layers on/off (grouped by category, origin shown: patient / PRIOR / ESTIMATE),
 //   show the 5 alignment landmarks, and run a SIMULATED registration: a virtual head is placed at a random pose,
 //   the 5 landmarks are "touched" with ~2 mm noise, and LandmarkRegistration moves the hologram onto it.
@@ -21,7 +21,7 @@ namespace SeegPlanner
         public PatientLoader loader;
         public LandmarkRegistration registration;
         public float distance = 0.45f;
-        const float PanelWidth = 330f;
+        const float PanelWidth = 330f, MinDist = 0.05f, MaxDist = 3f;
 
         float yaw = 180f, pitch = 10f;        // start looking at the face
         Vector3 panOffset;
@@ -59,7 +59,9 @@ namespace SeegPlanner
             Vector2 delta = Vector2.zero, pos = Vector2.zero; float wheel = 0f; bool left = false, right = false, down = false, up = false;
 #if ENABLE_INPUT_SYSTEM
             var m = Mouse.current; if (m == null) return;
-            delta = m.delta.ReadValue() * 0.2f; wheel = m.scroll.ReadValue().y / 120f; pos = m.position.ReadValue();
+            // Unity 6 (Input System 1.8+) reports about 1 per wheel notch, older versions 120 per notch
+            float raw = m.scroll.ReadValue().y; wheel = Mathf.Abs(raw) >= 10f ? raw / 120f : raw;
+            delta = m.delta.ReadValue() * 0.2f; pos = m.position.ReadValue();
             left = m.leftButton.isPressed; right = m.rightButton.isPressed;
             down = m.leftButton.wasPressedThisFrame; up = m.leftButton.wasReleasedThisFrame;
 #else
@@ -76,7 +78,7 @@ namespace SeegPlanner
                 var cam = Camera.main.transform;
                 panOffset -= (cam.right * delta.x + cam.up * delta.y) * 0.0015f * distance;
             }
-            distance = Mathf.Clamp(distance * (1f - wheel * 0.1f), 0.05f, 3f);
+            distance = Mathf.Clamp(distance * Mathf.Pow(0.85f, wheel), MinDist, MaxDist);      // 15 % per wheel notch
         }
 
         void CreateMarkers()
@@ -151,6 +153,15 @@ namespace SeegPlanner
                 GUILayout.EndArea(); return;
             }
             GUILayout.Label("Mouse: left drag = rotate, right drag = pan, wheel = zoom");
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Zoom", GUILayout.Width(40));
+            // slider in log scale, right = closer
+            float z = GUILayout.HorizontalSlider(-Mathf.Log(distance), -Mathf.Log(MaxDist), -Mathf.Log(MinDist));
+            distance = Mathf.Clamp(Mathf.Exp(-z), MinDist, MaxDist);
+            if (GUILayout.Button("-", GUILayout.Width(24))) distance = Mathf.Min(distance / 0.7f, MaxDist);
+            if (GUILayout.Button("+", GUILayout.Width(24))) distance = Mathf.Max(distance * 0.7f, MinDist);
+            if (GUILayout.Button("Reset", GUILayout.Width(50))) { distance = 0.45f; panOffset = Vector3.zero; yaw = 180f; pitch = 10f; }
+            GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Default")) SetAll(L => (bool)L["visible"]);
             if (GUILayout.Button("All")) SetAll(L => true);

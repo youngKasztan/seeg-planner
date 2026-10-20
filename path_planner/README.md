@@ -68,6 +68,10 @@ Without building: `run_app.bat` (or `python app.py`). Self-test without a window
 
 Note: Windows Smart App Control may block an unsigned exe. If it does, use `run_app.bat`.
 
+The 3D view uses pyqtgraph + PyOpenGL (pure Python, drawn by the system OpenGL driver). The earlier VTK /
+pyvista view was blocked by Smart App Control (unsigned `vtk*.dll`). 3D mouse: left drag = rotate,
+wheel = zoom, middle drag = move; buttons Front / Left / Right / Top reset the view.
+
 ## Test
 `python tests/test_path_planner.py` - synthetic head: artery above a target, two targets on one line (one path),
 target inside an artery (reported), Stop during planning, time limit, two crossing paths (alternative entry used).

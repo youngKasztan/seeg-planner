@@ -5,6 +5,6 @@ scikit-image
 trimesh
 matplotlib
 PySide6
-pyvista
-pyvistaqt
+pyqtgraph
+PyOpenGL
 pyinstaller

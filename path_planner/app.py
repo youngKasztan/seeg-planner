@@ -172,11 +172,11 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(self.views[0], 0, 0); grid.addWidget(self.views[1], 0, 1); grid.addWidget(self.views[2], 1, 0)
         self.view3d = None
         try:
-            from pyvistaqt import QtInteractor
-            self.view3d = QtInteractor(central); self.view3d.set_background("black")
-            grid.addWidget(self.view3d.interactor, 1, 1)
+            from view3d import View3D                               # pyqtgraph + OpenGL (pure Python, no VTK)
+            self.view3d = View3D(central); grid.addWidget(self.view3d, 1, 1)
         except Exception as ex:
-            lab = QtWidgets.QLabel(f"3D view not available:\n{ex}"); lab.setAlignment(QtCore.Qt.AlignCenter); grid.addWidget(lab, 1, 1)
+            lab = QtWidgets.QLabel(f"3D view not available:\n{ex}\n\nInstall it with:  pip install pyqtgraph PyOpenGL")
+            lab.setAlignment(QtCore.Qt.AlignCenter); lab.setWordWrap(True); grid.addWidget(lab, 1, 1)
         self.setCentralWidget(central)
 
         side = QtWidgets.QWidget(); sl = QtWidgets.QVBoxLayout(side); side.setMinimumWidth(430)
@@ -486,29 +486,24 @@ class MainWindow(QtWidgets.QMainWindow):
         for v in self.views: v.redraw()
 
     def _mesh(self, mask, step):
-        import pyvista as pv
-        from skimage import measure
-        from scipy import ndimage
-        m = ndimage.zoom(mask.astype(np.float32), 1 / step, order=1) if step > 1 else mask.astype(np.float32)
-        if m.max() < 0.5: return None
-        vv, ff, _, _ = measure.marching_cubes(np.pad(m, 1), 0.5)
-        pts = self.patient.vox_to_mm((vv - 1) * step)
-        return pv.PolyData(pts, np.hstack([np.full((len(ff), 1), 3), ff]).ravel())
+        from view3d import mesh_from_mask
+        return mesh_from_mask(mask, self.patient.vox_to_mm, step)
 
     def _build_3d(self):
         if self.view3d is None: return
         p = self.patient; v3 = self.view3d; v3.clear(); self.layer_meshes = {}
         b = self._mesh(p.brain, 2)
-        if b is not None: v3.add_mesh(b, color=[0.85, 0.7, 0.7], opacity=0.10, name="brain")
+        if b is not None:
+            v3.add_mesh("brain", *b, (0.85, 0.7, 0.7), 0.12); v3.fit(b[0])
         for key in self.layer_items: self._update_3d_layer(key)
-        v3.view_xz(); v3.reset_camera(); self._update_3d_targets()
+        self._update_3d_targets(); self._update_3d_paths()
 
     def _update_3d_layer(self, key):
         if self.view3d is None or self.patient is None: return
         it, getter, col, alpha = self.layer_items[key]
         name = "L_" + key
         if it.checkState(0) != QtCore.Qt.Checked or key.startswith("nogo:outside"):
-            self.view3d.remove_actor(name); return
+            self.view3d.remove(name); return
         if key not in self.layer_meshes:
             m = getter()
             if m is None: return
@@ -516,24 +511,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.layer_meshes[key] = self._mesh(m, 2 if big else 1)
         mesh = self.layer_meshes[key]
         if mesh is not None:
-            self.view3d.add_mesh(mesh, color=col, opacity=0.25 if key.endswith(("gray_matter", "white_matter", "scalp", "skull_t1")) else 0.7,
-                                 name=name, smooth_shading=True)
+            ml = getter().sum() * self.patient.vox.prod() / 1000
+            # large layers faint (they would hide the rest), small ones (vessels, sinus, plexus) solid
+            op = 0.15 if key.endswith(("gray_matter", "white_matter", "scalp", "skull_t1")) else 0.2 if ml > 20 else 1.0
+            self.view3d.add_mesh(name, *mesh, col, op)
 
     def _update_3d_targets(self):
         if self.view3d is None or self.patient is None: return
-        import pyvista as pv
-        self.view3d.remove_actor("targets")
+        self.view3d.remove("targets")
         if self.targets:
-            self.view3d.add_mesh(pv.PolyData(np.array(list(self.targets.values()))), color="magenta", point_size=14,
-                                 render_points_as_spheres=True, name="targets")
+            self.view3d.add_points("targets", np.array(list(self.targets.values())), (1.0, 0.0, 1.0), 14)
 
     def _update_3d_paths(self):
         if self.view3d is None: return
-        import pyvista as pv
-        for i in range(20): self.view3d.remove_actor(f"path{i}")
+        for name in [n for n in self.view3d.items if n.startswith("path")]: self.view3d.remove(name)
         for i, r in enumerate(self.paths):
-            line = pv.Spline(r.points, len(r.points)).tube(radius=self.cfg["robot"]["diameter_mm"] / 2)
-            self.view3d.add_mesh(line, color=PATH_COLOURS[i % len(PATH_COLOURS)], name=f"path{i}")
+            self.view3d.add_line(f"path{i}", r.points, PATH_COLOURS[i % len(PATH_COLOURS)], width=4)
 
 # ---------------------------------------------------------------------------------------------- entry
 def selftest(folder):

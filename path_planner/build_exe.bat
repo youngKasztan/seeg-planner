@@ -11,7 +11,7 @@ pip install -r requirements.txt || goto :error
 pyinstaller --noconfirm --clean --name ContinuumPathPlanner --windowed ^
   --add-data "robot.toml;." ^
   --collect-submodules skimage.graph --hidden-import scipy.optimize._highs ^
-  --collect-data trimesh --collect-submodules pyvista --collect-submodules vtkmodules ^
+  --collect-data trimesh --collect-submodules pyqtgraph --collect-submodules OpenGL ^
   --exclude-module torch --exclude-module tensorflow --exclude-module SimpleITK --exclude-module cv2 ^
   app.py || goto :error
 copy /Y robot.toml dist\ContinuumPathPlanner\robot.toml >nul

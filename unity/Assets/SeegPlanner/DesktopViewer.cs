@@ -104,7 +104,9 @@ namespace SeegPlanner
                 s.transform.SetParent(loader.PatientRoot, false);
                 s.transform.localPosition = loader.LandmarkLocal(name);
                 s.transform.localScale = Vector3.one * 0.006f;
-                s.GetComponent<Renderer>().material.color = LmColor(name);
+                var mat = PatientLoader.SolidMaterial(LmColor(name));        // default material is pink in a headset build
+                if (mat != null) s.GetComponent<Renderer>().sharedMaterial = mat;
+                else s.GetComponent<Renderer>().material.color = LmColor(name);
                 markers.Add(s); markerByName[name] = s;
             }
             // the skin needs a collider so a mouse click can find the point on it

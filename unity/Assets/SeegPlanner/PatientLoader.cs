@@ -58,6 +58,7 @@ namespace SeegPlanner
 
             foreach (Transform t in PatientRoot.GetComponentsInChildren<Transform>(true))
                 if (t != PatientRoot) Layers[t.name] = t.gameObject;
+            UseBuildSafeMaterials(dir);
 
             foreach (JObject layer in Manifest["layers"])
             {
@@ -93,6 +94,78 @@ namespace SeegPlanner
                 }
             }
             Debug.Log("Patient files copied from the app to " + dir);
+        }
+
+        /// glTFast builds its materials at run time from shaders that a player build (e.g. the Quest app) strips,
+        /// so the model shows up pink. Replace every material with a copy of one of two URP Lit materials kept in
+        /// Assets/SeegPlanner/Resources (always included in the build, created by Editor/SeegMaterials.cs).
+        /// Colours come from the manifest (layers) and plan.json (robot paths), so nothing depends on glTFast's shaders.
+        void UseBuildSafeMaterials(string dir)
+        {
+            var opaque = Resources.Load<Material>("SeegLitOpaque");
+            var transparent = Resources.Load<Material>("SeegLitTransparent");
+            if (opaque == null || transparent == null)
+            {
+                Debug.LogWarning("SeegLitOpaque / SeegLitTransparent not found in Resources - open the project in the Unity Editor " +
+                                 "once (Tools > SEEG Planner > Recreate headset materials). Keeping the glTF materials.");
+                return;
+            }
+            var colours = new Dictionary<string, Color>();
+            foreach (JObject L in Manifest["layers"])
+            {
+                var c = L["colour"]; if (c == null) continue;
+                float a = L["opacity"] != null ? (float)L["opacity"] : 1f;
+                colours[(string)L["name"]] = new Color((float)c[0], (float)c[1], (float)c[2], a);
+            }
+            string planPath = Path.Combine(dir, "plan.json");
+            if (File.Exists(planPath))
+            {
+                var plan = JObject.Parse(File.ReadAllText(planPath));
+                if (plan["paths"] != null)
+                    foreach (JObject p in plan["paths"])
+                    {
+                        var c = p["colour"]; if (c == null) continue;
+                        colours[(string)p["id"]] = new Color((float)c[0], (float)c[1], (float)c[2], 1f);
+                    }
+            }
+            var targetColour = new Color(1f, 0.1f, 0.9f, 1f);
+
+            int n = 0;
+            foreach (var r in PatientRoot.GetComponentsInChildren<Renderer>(true))
+            {
+                Color col = ColourFor(r.transform, colours, targetColour, r.sharedMaterial);
+                var m = new Material(col.a < 0.99f ? transparent : opaque);
+                m.name = r.gameObject.name;
+                m.SetColor("_BaseColor", col);
+                var mats = new Material[Mathf.Max(1, r.sharedMaterials.Length)];
+                for (int i = 0; i < mats.Length; i++) mats[i] = m;
+                r.sharedMaterials = mats;
+                n++;
+            }
+            Debug.Log($"Build-safe URP materials set on {n} meshes");
+        }
+
+        /// Colour of the layer / path this mesh belongs to (walks up to the named node).
+        Color ColourFor(Transform t, Dictionary<string, Color> colours, Color targetColour, Material old)
+        {
+            for (var p = t; p != null && p != PatientRoot; p = p.parent)
+            {
+                if (colours.TryGetValue(p.name, out var c)) return c;
+                if (p.name.StartsWith("target_")) return targetColour;
+            }
+            if (old != null && old.HasProperty("baseColorFactor")) return old.GetColor("baseColorFactor");
+            if (old != null && old.HasProperty("_BaseColor")) return old.GetColor("_BaseColor");
+            return new Color(0.8f, 0.8f, 0.8f, 1f);
+        }
+
+        /// Solid colour material that survives a player build (markers, pen tip); null if Resources is missing.
+        public static Material SolidMaterial(Color c)
+        {
+            var tpl = Resources.Load<Material>("SeegLitOpaque");
+            if (tpl == null) return null;
+            var m = new Material(tpl);
+            m.SetColor("_BaseColor", c);
+            return m;
         }
 
         public void SetLayerVisible(string name, bool visible)

@@ -28,6 +28,34 @@ Not yet run inside Unity / on a headset.
    with the planner's layers (`patient_scene.glb`) are written to the same folder and loaded on the next Play.
 
 
+## Headset over Meta Horizon Link (Quest 3, no Android build)
+Play mode in the Editor runs on the headset, with passthrough; the patient files are read from the PC folder.
+1. PC: Meta Horizon Link app -> Settings -> General -> OpenXR Runtime: Meta Horizon Link active;
+   Settings -> Developer (or Beta): Developer runtime features ON, Pass-through over Meta Horizon Link ON.
+2. Package Manager: install **Unity OpenXR: Meta** (brings OpenXR + AR Foundation).
+3. Project Settings -> XR Plug-in Management -> Windows tab: OpenXR ON; OpenXR -> Windows tab: add
+   Oculus Touch Controller Profile, enable feature group Meta Quest; Project Validation: Fix All.
+4. URP asset: HDR off; Renderer: Post-processing off (passthrough needs the alpha channel).
+5. Scene: delete Main Camera; GameObject -> XR -> AR Session and XR Origin (Mobile AR);
+   on its Main Camera: Background Type = Solid Color, colour black with alpha 0;
+   Tracked Pose Driver: position / rotation input = XR HMD centerEyePosition / centerEyeRotation.
+6. `Patient` object: add `QuestControls` (Loader and Registration = Patient). DesktopViewer stays: its panel
+   is on the PC screen, and it does not move the camera while a headset is active.
+7. Headset: Quick Settings -> Link -> connect; press Play in Unity.
+Controls: right trigger = record landmark at the red pen tip, left Y = skip landmark, right B = restart,
+right A = hologram on/off, left X = skin on/off, left grip = carry the brain.
+
+## Headset app on the Quest (passthrough without Link)
+Meta Horizon Link v83+ has no Beta tab, so "Passthrough over Link" cannot be switched on; an app built for the
+headset always has passthrough.
+1. Unity Hub -> Installs -> Unity 6.3 -> Add modules: Android Build Support (+ OpenJDK, Android SDK & NDK).
+2. Headset in Developer Mode (Meta Horizon phone app of the headset's admin account -> Devices -> Developer Mode).
+3. Copy the patient's `headset` folder content (headset_manifest.json, patient_scene*.glb, paths.glb, plan.json)
+   into `Assets/StreamingAssets/patient/`. PatientLoader copies them out of the app at start (no adb).
+4. File -> Build Profiles -> Android -> Switch Platform. XR Plug-in Management -> Android tab: OpenXR,
+   Meta Quest feature group, Oculus Touch Controller Profile; Project Validation -> Fix All.
+5. Headset on USB, allow USB debugging in the headset; Build Profiles -> Android -> Run Device = Quest 3 -> Build And Run.
+
 ## Headset setup (Quest 3)
 1. Unity 6 LTS, template "Mixed Reality" (or 3D URP). Android Build Support for Quest.
 2. Packages: OpenXR Plugin, XR Interaction Toolkit, Meta OpenXR (Quest passthrough), `com.unity.cloud.gltfast`, `com.unity.nuget.newtonsoft-json`.

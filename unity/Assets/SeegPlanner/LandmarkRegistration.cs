@@ -2,7 +2,7 @@
 // The user touches each landmark on the patient/phantom with the controller tip and presses the trigger.
 // After >= 3 landmarks, a rigid transform (RigidFit.cs: Horn's quaternion method = same result as Kabsch in
 // tools/registration.py) moves PatientRoot so the model landmarks coincide with the touched points.
-// STATUS: desktop-testable with simulated touches (DesktopViewer.cs); not yet tested on a headset.
+// STATUS: desktop-testable with simulated touches (DesktopViewer.cs); on the headset: QuestControls.cs.
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -19,7 +19,11 @@ namespace SeegPlanner
         readonly List<Vector3> worldPts = new();            // touched positions in world space
         public float LastFreMm { get; private set; }
 
-        public string NextLandmark { get { var o = Order; return modelPts.Count < o.Count ? o[modelPts.Count] : null; } }
+        int next;                                           // index in Order of the landmark to touch next
+        public string NextLandmark { get { var o = Order; return next < o.Count ? o[next] : null; } }
+
+        /// Skip the current landmark (e.g. eye corners that are hard to reach); at least 3 must be touched.
+        public void Skip() { if (NextLandmark != null) next++; }
 
         /// Call when the trigger is pressed with the controller tip on the current landmark.
         public void Capture() { if (pointerTip != null) CaptureWorld(pointerTip.position); }
@@ -30,12 +34,13 @@ namespace SeegPlanner
             if (NextLandmark == null) return;
             modelPts.Add(loader.LandmarkLocal(NextLandmark));
             worldPts.Add(world);
+            next++;
             if (modelPts.Count >= 3) Solve();
         }
 
         public int CapturedCount => modelPts.Count;
 
-        public void ResetCapture() { modelPts.Clear(); worldPts.Clear(); }
+        public void ResetCapture() { modelPts.Clear(); worldPts.Clear(); next = 0; }
 
         void Solve()
         {

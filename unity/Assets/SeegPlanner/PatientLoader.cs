@@ -13,7 +13,7 @@ namespace SeegPlanner
 {
     public class PatientLoader : MonoBehaviour
     {
-        [Tooltip("Folder with patient_scene.glb and headset_manifest.json. Empty = Application.persistentDataPath/patient")]
+        [Tooltip("Folder with patient_scene.glb and headset_manifest.json. Empty or not found (headset app) = files copied from Assets/StreamingAssets/patient")]
         public string packageFolder = "";
         public bool useLiteScene = false;
 
@@ -28,6 +28,11 @@ namespace SeegPlanner
         public async Task Load()
         {
             string dir = string.IsNullOrEmpty(packageFolder) ? Path.Combine(Application.persistentDataPath, "patient") : packageFolder;
+            if (!Directory.Exists(dir))                                   // e.g. a PC path in an app running on the headset
+            {
+                dir = Path.Combine(Application.persistentDataPath, "patient");
+                await CopyFromStreamingAssets(dir);
+            }
             string manifestPath = ManifestPath = Path.Combine(dir, "headset_manifest.json");
             if (!File.Exists(manifestPath)) { Debug.LogError("headset_manifest.json not found in " + dir + " - set 'Package Folder' on PatientLoader"); return; }
             Manifest = JObject.Parse(File.ReadAllText(manifestPath));
@@ -61,6 +66,33 @@ namespace SeegPlanner
             }
             IsLoaded = true;
             Debug.Log($"Patient loaded: {Layers.Count} nodes from {dir}");
+        }
+
+        static readonly string[] PackageFiles =
+            { "headset_manifest.json", "patient_scene.glb", "patient_scene_lite.glb", "paths.glb", "plan.json" };
+
+        /// Headset app: copy the patient files built into the app (Assets/StreamingAssets/patient/) to a normal
+        /// folder at every start, so no adb is needed and a new build always shows the newly exported plan.
+        static async Task CopyFromStreamingAssets(string dir)
+        {
+            Directory.CreateDirectory(dir);
+            foreach (string f in PackageFiles)
+            {
+                string url = Path.Combine(Application.streamingAssetsPath, "patient", f);
+                if (!url.Contains("://")) url = new System.Uri(url).AbsoluteUri;           // desktop: file:// path
+                using (var req = UnityEngine.Networking.UnityWebRequest.Get(url))
+                {
+                    var op = req.SendWebRequest();
+                    while (!op.isDone) await Task.Yield();
+                    if (req.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
+                    {
+                        if (f == "headset_manifest.json") Debug.LogWarning("No patient files in StreamingAssets/patient (" + req.error + ")");
+                        continue;
+                    }
+                    File.WriteAllBytes(Path.Combine(dir, f), req.downloadHandler.data);
+                }
+            }
+            Debug.Log("Patient files copied from the app to " + dir);
         }
 
         public void SetLayerVisible(string name, bool visible)

@@ -57,6 +57,7 @@ namespace SeegPlanner
         {
             if (loader == null || !loader.IsLoaded) return;
             if (markers.Count == 0) CreateMarkers();
+            if (UnityEngine.XR.XRSettings.isDeviceActive) return;      // headset on: the headset moves the camera (QuestControls)
             HandleMouse();
             var cam = Camera.main; if (cam == null) return;
             Transform root = loader.PatientRoot;

@@ -17,13 +17,14 @@ sys.path.insert(0, HERE)
 import config, labels, layers
 from patient import Patient
 from planner import Planner, Cancelled
-import export, electrode
+import export, electrode, regions
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import matplotlib
 matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+from matplotlib.widgets import LassoSelector
 
 APP_NAME = "Continuum Path Planner"
 PATH_COLOURS = export.COLOURS
@@ -69,6 +70,13 @@ class SliceView(QtWidgets.QWidget):
         self.canvas.mpl_connect("button_press_event", self._press)
         self.img = self.ov = None
         self.artists = []
+        # outline drawing for target regions (active only while 'Draw outline' is on)
+        self.lasso = LassoSelector(self.ax, self._lasso_done, useblit=False, button=1,
+                                   props=dict(color="yellow", linewidth=1.5))
+        self.lasso.set_active(False)
+
+    def _lasso_done(self, verts):
+        if len(verts) >= 3: self.app.region_outline(self.axis, self.slider.value(), np.asarray(verts, float))
 
     def setup(self, shape):
         self.slider.blockSignals(True); self.slider.setRange(0, shape[self.axis] - 1); self.slider.blockSignals(False)
@@ -98,7 +106,7 @@ class SliceView(QtWidgets.QWidget):
         self.slider.setValue(self.slider.value() + (step if ev.button == "up" else -step))
 
     def _press(self, ev):
-        if ev.inaxes is None or ev.xdata is None: return
+        if ev.inaxes is None or ev.xdata is None or self.app.drawing(): return
         ijk = self.to_ijk(ev.xdata, ev.ydata, self.slider.value())
         self.clicked.emit(self.axis, ijk, ev.button == 1)
 
@@ -119,9 +127,15 @@ class SliceView(QtWidgets.QWidget):
         o = np.zeros(sl.shape + (4,), np.float32)                  # all ticked layers, in list order
         for key, mask, col, alpha in a.visible_layers():
             m = self.take(mask, k); o[m] = (*col, alpha)
+        for r in a.regions.values():                                # target regions on top of the layers
+            if r.mask is not None: o[self.take(r.mask, k)] = (*r.colour, 0.45)
         self.ov.set_data(o)
         for art in self.artists: art.remove()
         self.artists = []
+        for r in a.regions.values():                                # the outline drawn on this slice
+            if self.axis in r.outlines and r.outlines[self.axis][0] == k:
+                vt = r.outlines[self.axis][1]
+                self.artists += self.ax.plot(np.r_[vt[:, 0], vt[:1, 0]], np.r_[vt[:, 1], vt[:1, 1]], color=r.colour, lw=1.5)
         u, v, _ = self.uv(a.cursor)
         self.artists += [self.ax.axvline(u[0], color="#2a6", lw=0.6, alpha=0.6), self.ax.axhline(v[0], color="#2a6", lw=0.6, alpha=0.6)]
         if a.chk_paths.isChecked():
@@ -132,7 +146,7 @@ class SliceView(QtWidgets.QWidget):
                 if near.any():
                     self.artists += self.ax.plot(np.where(near, pu, np.nan), np.where(near, pv, np.nan), color=col, lw=3)
                 if a.chk_contacts.isChecked():                     # electrode contacts on this slice
-                    c = electrode.for_path(r, a.cfg, a.targets)
+                    c = electrode.for_path(r, a.cfg, a.plan_targets())
                     if len(c.centres):
                         cu, cv, cd = self.uv(p.mm_to_vox(c.centres))
                         on = np.abs(cd - k) <= 2.0
@@ -143,6 +157,12 @@ class SliceView(QtWidgets.QWidget):
                                 (on & hit, dict(s=90, marker="o", facecolors="none", edgecolors="#3f3", linewidths=2.0, zorder=7)))
                         for m, style in sets:                      # faint = contact on another slice, bold = on this slice
                             if m.any(): self.artists.append(self.ax.scatter(cu[m], cv[m], **style))
+        for n, t in a.region_tips.items():                          # tip chosen inside a region (after planning)
+            tu, tv, td = self.uv(p.mm_to_vox(t)); inside = abs(td[0] - k) <= 2
+            col = a.regions[n].colour if n in a.regions else (1, 1, 0)
+            self.artists.append(self.ax.scatter(tu, tv, s=110 if inside else 30, marker="*", facecolors=col if inside else "none",
+                                                edgecolors=col, linewidths=1.2, zorder=5))
+            if inside: self.artists.append(self.ax.text(tu[0] + 4, tv[0] + 4, n, color=col, fontsize=8, zorder=6))
         for n, t in a.targets.items():
             tu, tv, td = self.uv(p.mm_to_vox(t)); inside = abs(td[0] - k) <= 2
             sel = a.current_target() == n
@@ -158,6 +178,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(APP_NAME); self.resize(1500, 950)
         self.cfg = config.load(); self.patient = self.planner = None
         self.targets, self.paths, self.uncovered, self.cursor = {}, [], [], np.zeros(3, int)
+        self.regions, self.region_tips = {}, {}                    # name -> regions.Region; name -> tip chosen by the planner
         self.layer_items, self.layer_meshes = {}, {}               # key -> (tree item, mask getter, colour, alpha)
         self.worker = None
         self._pending_layers = set()
@@ -199,6 +220,21 @@ class MainWindow(QtWidgets.QMainWindow):
         for text, fn in (("Delete", self.delete_target), ("Snap to safe point", self.snap_target), ("Clear all", self.clear_targets)):
             b = QtWidgets.QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
         sl.addLayout(row)
+        sl.addWidget(QtWidgets.QLabel("<b>Target regions</b>  (the robot tip goes anywhere inside; double click to rename)"))
+        self.reglist = QtWidgets.QListWidget(); self.reglist.setMaximumHeight(80)
+        self.reglist.itemDoubleClicked.connect(self.rename_region)
+        self.reglist.currentRowChanged.connect(self.goto_region); sl.addWidget(self.reglist)
+        row = QtWidgets.QHBoxLayout()
+        self.btn_draw = QtWidgets.QPushButton("Draw outline"); self.btn_draw.setCheckable(True)
+        self.btn_draw.setToolTip("Hold the left mouse button and draw around the area on a slice.\n"
+                                 "Then draw it on a slice of a second view (e.g. axial, then coronal):\n"
+                                 "the region is where the outlines overlap. Drawing again in a view replaces it.")
+        self.btn_draw.toggled.connect(self.toggle_draw); row.addWidget(self.btn_draw)
+        for text, fn in (("New region", self.new_region), ("Delete region", self.delete_region)):
+            b = QtWidgets.QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
+        sl.addLayout(row)
+        self.chk_clip = QtWidgets.QCheckBox("Region only inside the brain"); self.chk_clip.setChecked(True)
+        self.chk_clip.toggled.connect(self._rebuild_regions); sl.addWidget(self.chk_clip)
         sl.addWidget(QtWidgets.QLabel("<b>Layers</b>  (tick to show on the slices and in 3D)"))
         self.ltree = QtWidgets.QTreeWidget(); self.ltree.setHeaderHidden(True)
         self.ltree.itemChanged.connect(self._layer_toggled); sl.addWidget(self.ltree, 5)
@@ -300,6 +336,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bar.setValue(1000); self.status.showMessage("Left click on a slice to add a target")
         tf = os.path.join(p.folder, "targets.json")
         if os.path.exists(tf): self.load_targets(tf)
+        self._load_regions()
         self._build_layer_tree(); self._build_3d(); self.redraw()
 
     # ------------------------------------------------------------------ layers
@@ -426,7 +463,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if n: self.targets.pop(n); self._refresh_targets(); self.redraw()
 
     def clear_targets(self):
-        self.targets.clear(); self.paths = []; self._refresh_targets(); self._refresh_paths(); self.redraw()
+        self.targets.clear(); self.paths = []; self.region_tips = {}
+        self._refresh_targets(); self._refresh_paths(); self._refresh_regions(); self._update_3d_paths(); self.redraw()
 
     def snap_target(self):
         n = self.current_target()
@@ -436,11 +474,138 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(f"{n}: moved {np.linalg.norm(s - self.targets[n]):.1f} mm to a safe point")
         self.targets[n] = s; self._refresh_targets(select=n); self.goto_target(0)
 
+    # ------------------------------------------------------------------ target regions
+    def drawing(self):
+        return self.btn_draw.isChecked()
+
+    def plan_targets(self):
+        """Point targets + the tips the planner chose inside the target regions."""
+        return {**self.targets, **self.region_tips}
+
+    def current_region(self):
+        it = self.reglist.currentItem(); return it.data(QtCore.Qt.UserRole) if it else None
+
+    def _unique(self, base):
+        n = 1
+        while f"{base}{n}" in self.regions or f"{base}{n}" in self.targets: n += 1
+        return f"{base}{n}"
+
+    def new_region(self):
+        if self.patient is None: return None
+        name = self._unique("R")
+        self.regions[name] = regions.Region(name, regions.COLOURS[(len(self.regions)) % len(regions.COLOURS)])
+        self._refresh_regions(select=name)
+        if not self.btn_draw.isChecked(): self.btn_draw.setChecked(True)
+        self._log(f"{name}: draw its outline on a slice, then on a slice of another view")
+        return name
+
+    def toggle_draw(self, on):
+        for v in self.views: v.lasso.set_active(on)
+        self.status.showMessage("Draw the region outline with the left mouse button (then in a second view)" if on
+                                else "Left click on a slice to add a target")
+
+    def region_outline(self, axis, k, verts):
+        if self.patient is None: return
+        name = self.current_region() or self.new_region()
+        r = self.regions[name]
+        r.set_outline(axis, k, verts)
+        self._build_region(r)
+        self.region_tips.pop(name, None)
+        hint = "" if len(r.outlines) > 1 else " - now draw it in a second view to set its depth"
+        if r.mask is not None and r.mask.any():                    # other views jump to the region
+            c = np.round(np.argwhere(r.mask).mean(0)).astype(int); c[axis] = k; self.cursor = c
+        self._log(f"{name}: outline in the {regions.VIEW_NAMES[axis]} view, {r.volume_ml(self.patient.vox):.1f} ml{hint}")
+        self._refresh_regions(select=name); self._update_3d_regions(); self._save_regions(); self.redraw()
+
+    def _build_region(self, r):
+        p = self.patient
+        r.build(p.shape, p.vox, clip=p.brain if self.chk_clip.isChecked() else None)
+
+    def _rebuild_regions(self):
+        if self.patient is None: return
+        for r in self.regions.values(): self._build_region(r)
+        self.region_tips = {}
+        self._refresh_regions(select=self.current_region()); self._update_3d_regions(); self.redraw()
+
+    def _refresh_regions(self, select=None):
+        self.reglist.blockSignals(True); self.reglist.clear()
+        for n, r in self.regions.items():
+            tip = "  tip chosen" if n in self.region_tips else ""
+            it = QtWidgets.QListWidgetItem(f"{n}: {r.volume_ml(self.patient.vox):.1f} ml  ({r.views()}){tip}")
+            it.setData(QtCore.Qt.UserRole, n); it.setForeground(QtGui.QColor.fromRgbF(*r.colour))
+            self.reglist.addItem(it)
+            if n == select: self.reglist.setCurrentItem(it)
+        self.reglist.blockSignals(False)
+
+    def goto_region(self, row):
+        """Show the selected region: cursor to the slice of its outline (or its centre)."""
+        n = self.current_region()
+        if not (n and self.patient is not None): return
+        r = self.regions[n]
+        if r.mask is not None and r.mask.any():
+            self.cursor = np.round(np.argwhere(r.mask).mean(0)).astype(int)
+        elif r.outlines:
+            axis, (k, vt) = next(iter(r.outlines.items()))
+            self.cursor = np.round(regions.to_ijk(axis, vt[:1, 0], vt[:1, 1], k)[0]).astype(int)
+        self.redraw()
+
+    def rename_region(self, item):
+        old = item.data(QtCore.Qt.UserRole)
+        new, ok = QtWidgets.QInputDialog.getText(self, "Rename region", "Name:", text=old)
+        if ok and new and new not in self.regions and new not in self.targets:
+            self.regions = {(new if k == old else k): v for k, v in self.regions.items()}; self.regions[new].name = new
+            if old in self.region_tips: self.region_tips[new] = self.region_tips.pop(old)
+            self._refresh_regions(select=new); self._update_3d_regions(); self._save_regions(); self.redraw()
+
+    def delete_region(self):
+        n = self.current_region()
+        if not n: return
+        self.regions.pop(n); self.region_tips.pop(n, None)
+        self._refresh_regions(); self._update_3d_regions(); self._save_regions(); self.redraw()
+
+    def _save_regions(self, masks=False):
+        if self.patient is None: return
+        p = self.patient
+        regions.save(p.folder, self.regions, p.vox_to_mm, p.affine if masks else None)
+
+    def _load_regions(self):
+        p = self.patient
+        self.regions, self.region_tips = regions.load(p.folder, p.mm_to_vox), {}
+        for r in self.regions.values(): self._build_region(r)
+        if self.regions: self._log(f"{len(self.regions)} target region(s) loaded from regions.json")
+        self._refresh_regions()
+
+    def _update_3d_regions(self):
+        if self.view3d is None or self.patient is None: return
+        for name in [n for n in self.view3d.items if n.startswith("REG_")]: self.view3d.remove(name)
+        for n, r in self.regions.items():
+            if r.mask is None or not r.mask.any(): continue
+            mesh = self._mesh(r.mask, 1)
+            if mesh is not None: self.view3d.add_mesh("REG_" + n, *mesh, r.colour, 0.45)
+
+    def region_contacts(self, path, c):
+        """{region name: number of electrode contacts inside it} for the regions this path is planned for."""
+        out = {}
+        for n in path.targets:
+            r = self.regions.get(n)
+            if r is None or r.mask is None or not len(c.centres): continue
+            ijk = np.round(self.patient.mm_to_vox(c.centres)).astype(int)
+            ok = np.all((ijk >= 0) & (ijk < np.array(r.mask.shape)), axis=1)
+            out[n] = int(r.mask[tuple(ijk[ok].T)].sum())
+        return out
+
+    def contact_text(self, path):
+        c = electrode.for_path(path, self.cfg, self.plan_targets())
+        txt = electrode.summary(c, self.cfg)
+        for n, k in self.region_contacts(path, c).items(): txt += f" | region {n}: {k} contact(s) inside"
+        return c, txt
+
     def save_targets(self):
         if self.patient is None: return
         path = os.path.join(self.patient.folder, "targets.json")
         json.dump([{"name": n, "ras_mm": np.round(v, 2).tolist()} for n, v in self.targets.items()], open(path, "w"), indent=1)
-        self._log(f"targets saved to {path}")
+        self._save_regions(masks=True)
+        self._log(f"targets saved to {path}" + (f"; {len(self.regions)} region(s) to regions.json and regions/" if self.regions else ""))
 
     def load_targets(self, path=None):
         if self.patient is None: return
@@ -451,28 +616,36 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ------------------------------------------------------------------ planning
     def plan(self):
-        if not (self.planner and self.targets): self._log("open a patient and add targets first"); return
+        regs = {n: r.mask for n, r in self.regions.items() if r.mask is not None and r.mask.any()}
+        if not (self.planner and (self.targets or regs)): self._log("open a patient and add targets or regions first"); return
         if self.busy(): self._log("busy - wait for the current task or press Stop"); return
         targets, pl = {k: np.array(v, float) for k, v in self.targets.items()}, self.planner
         pl.robot, pl.pl = self.cfg["robot"], self.cfg["planning"]; pl.cfg = self.cfg
-        n = len(targets)
+        n = len(targets) + len(regs)
         self._log(f"Planning {n} target(s) ... (each target alone, then groups of targets on one path; "
                   f"time limit {self.cfg['planning'].get('time_limit_s', 120)} s, Stop keeps what was found)")
         def job(log, progress):
             pl.log, pl.progress = log, progress
             pl.should_stop = lambda: self.worker.stop_requested
-            try: return pl.plan_all(targets)
+            try:
+                tips = {}
+                for rn, mask in regs.items():                        # 1. a tip anywhere inside every region
+                    progress(0.0, f"choosing the best point in region {rn}")
+                    tip, msg = pl.region_tip(rn, mask)
+                    log(f"  region {rn}: {msg}")
+                    if tip is not None: tips[rn] = tip
+                return pl.plan_all({**targets, **tips}), tips       # 2. then planned like point targets
             finally: pl.should_stop = lambda: False
         self._run(job, self._planned)
 
     def _planned(self, res):
-        self.paths, self.uncovered, _ = res
-        self._log(f"{len(self.paths)} path(s) for {len(self.targets)} target(s)")
+        (self.paths, self.uncovered, _), self.region_tips = res
+        self._log(f"{len(self.paths)} path(s) for {len(self.targets) + len(self.region_tips)} target(s)")
+        self._refresh_regions(select=self.current_region()); self._update_3d_targets()
         for n in self.uncovered:
             self._log(f"NOT REACHED: {n} - {self.planner.target_problems.get(n, 'no path satisfies all constraints')}")
         for i, r in enumerate(self.paths):
-            c = electrode.for_path(r, self.cfg, self.targets)
-            self._log(f"  path {i + 1} electrode: {electrode.summary(c, self.cfg)}")
+            self._log(f"  path {i + 1} electrode: {self.contact_text(r)[1]}")
         self._refresh_paths(); self._update_3d_paths(); self.redraw()
 
     def _contacts_toggled(self):
@@ -483,10 +656,9 @@ class MainWindow(QtWidgets.QMainWindow):
         nogo = [z for z in self.cfg.get("no_go", {}) if "outside_of" not in self.cfg["no_go"][z]]
         for i, r in enumerate(self.paths):
             close = min(((r.min_clearance_mm.get(z, 99), z) for z in nogo), default=(None, ""))
-            c = electrode.for_path(r, self.cfg, self.targets)
+            c, ctext = self.contact_text(r)
             it = QtWidgets.QTreeWidgetItem([f"{i + 1}: {' -> '.join(r.targets)}", f"{r.length_mm:.0f} mm",
-                                            f"{r.min_radius_mm:.0f} mm", f"{close[1]} {close[0]} mm",
-                                            electrode.summary(c, self.cfg)])
+                                            f"{r.min_radius_mm:.0f} mm", f"{close[1]} {close[0]} mm", ctext])
             it.setForeground(0, QtGui.QColor.fromRgbF(*PATH_COLOURS[i % len(PATH_COLOURS)]))
             if len(c.hits) < len(c.on_target): it.setForeground(4, QtGui.QColor("#f66"))
             it.setToolTip(4, "#n = contact number from the tip (1 = deepest), then the distance from the target to its centre")
@@ -510,6 +682,9 @@ class MainWindow(QtWidgets.QMainWindow):
             origin = ("prior" if ("prior" in name or "prior" in files) else "atlas function" if "eloquent" in name
                       else "estimate" if name == "skull_t1" else "patient")
             out.append((name, group, m, tuple(col), kind == "nogo", origin))
+        for n, r in self.regions.items():                           # target regions drawn by the doctor
+            if r.mask is not None and r.mask.any():
+                out.append((f"region_{n}", "Target regions", r.mask, tuple(r.colour), True, "drawn by the doctor"))
         return out
 
     def export(self):
@@ -519,7 +694,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, APP_NAME, "No headset/headset_manifest.json in the patient folder.\n"
                                           "Run tools/export_headset.py first."); return
         centre = np.array(man["coordinate_system"]["head_centre_ras_mm"])
-        p, paths, targets, cfg = self.patient, list(self.paths), dict(self.targets), self.cfg
+        p, paths, targets, cfg = self.patient, list(self.paths), dict(self.plan_targets()), self.cfg
         uncovered, problems = list(self.uncovered), dict(getattr(self.planner, "target_problems", {}))
         layers = self.headset_layers()
         self.save_targets()
@@ -553,7 +728,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if b is not None:
             v3.add_mesh("brain", *b, (0.85, 0.7, 0.7), 0.12); v3.fit(b[0])
         for key in self.layer_items: self._update_3d_layer(key)
-        self._update_3d_targets(); self._update_3d_paths()
+        self._update_3d_targets(); self._update_3d_paths(); self._update_3d_regions()
 
     def _update_3d_layer(self, key):
         if self.view3d is None or self.patient is None: return
@@ -576,8 +751,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_3d_targets(self):
         if self.view3d is None or self.patient is None: return
         self.view3d.remove("targets")
-        if self.targets:
-            self.view3d.add_points("targets", np.array(list(self.targets.values())), (1.0, 0.0, 1.0), 14)
+        if self.plan_targets():
+            self.view3d.add_points("targets", np.array(list(self.plan_targets().values())), (1.0, 0.0, 1.0), 14)
 
     def _update_3d_paths(self):
         if self.view3d is None: return
@@ -585,7 +760,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, r in enumerate(self.paths):
             self.view3d.add_line(f"path{i}", r.points, PATH_COLOURS[i % len(PATH_COLOURS)], width=4)
             if self.chk_contacts.isChecked():
-                c = electrode.for_path(r, self.cfg, self.targets)
+                c = electrode.for_path(r, self.cfg, self.plan_targets())
                 rest = [j for j in range(len(c.centres)) if j not in c.hits]
                 if rest: self.view3d.add_points(f"path{i}_contacts", c.centres[rest], (1.0, 1.0, 1.0), 7)
                 if c.hits: self.view3d.add_points(f"path{i}_hits", c.centres[sorted(c.hits)], (0.2, 1.0, 0.2), 13)

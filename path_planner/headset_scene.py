@@ -20,7 +20,8 @@ import export
 
 GROUPS = {"nogo": "No-go zones", "soft": "Soft zones", "layer": "Anatomy"}
 HEAD_LAYERS = ("skull_t1", "scalp")
-CATEGORY = {"No-go zones": "critical", "Soft zones": "soft", "Anatomy": "anatomy", "Head": "surface"}
+CATEGORY = {"No-go zones": "critical", "Soft zones": "soft", "Anatomy": "anatomy", "Head": "surface",
+            "Target regions": "target"}
 
 
 def mask_mesh(mask, vox_to_mm, sigma):
@@ -36,6 +37,7 @@ def mask_mesh(mask, vox_to_mm, sigma):
 def opacity(key, ml):
     """Same rule as the 3D view of the app: large layers faint, small ones solid."""
     if key in ("gray_matter", "white_matter", "scalp", "skull_t1"): return 0.15
+    if key.startswith("region_"): return 0.35                          # target region: see the path inside it
     return 0.2 if ml > 20 else 1.0
 
 

@@ -441,6 +441,48 @@ class Planner:
                 c = cand[m]; return c[np.argmin(np.linalg.norm(c - tip, axis=1))]
         return None
 
+    # ------------------------------------------------------------------ target regions
+    def _skin_field(self):
+        """Coarse cost of the cheapest route from any allowed skin entry to every grid cell (one Dijkstra, cached)."""
+        if getattr(self, "_skin_cum", None) is None:
+            m = MCP_Geometric(self.g_cost, fully_connected=True)
+            self._skin_cum, _ = m.find_costs([tuple(i) for i in self.entry_idx])
+        return self._skin_cum
+
+    def region_tip(self, name, mask, n_try=3, edge_mm=1.5, spread_mm=5.0):
+        """Tip point for a target region (boolean volume on the patient grid): anywhere inside the region.
+        Safe points (clear of every strict no-go zone) at least edge_mm inside the region's edge are preferred;
+        they are ranked by the coarse route cost from the skin, the n_try best (spread_mm apart) are planned in
+        full and the tip of the cheapest feasible path is returned. -> (tip RAS mm or None, message)."""
+        ijk = np.argwhere(mask)
+        if not len(ijk): return None, "the region is empty"
+        if len(ijk) > 20000: ijk = ijk[np.random.default_rng(0).choice(len(ijk), 20000, replace=False)]
+        pts = self.p.vox_to_mm(ijk)
+        safe = self.p.C_strict(pts) > 0.3
+        if not safe.any(): return None, "the whole region lies in no-go zones (or too close to them)"
+        lo, hi = ijk.min(0), ijk.max(0) + 1                         # distance to the region's edge, on its bounding box
+        sub = np.pad(mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]], 1)
+        depth = ndimage.distance_transform_edt(sub, sampling=self.p.vox)[tuple((ijk - lo + 1).T)]
+        inner = safe & (depth >= min(edge_mm, depth[safe].max()))
+        cum = self._skin_field()
+        gi = np.array([self.g_idx(q) for q in pts[inner]])
+        cost = cum[tuple(gi.T)]
+        cand, P = [], pts[inner]
+        for i in np.argsort(cost):
+            if not np.isfinite(cost[i]): break
+            if all(np.linalg.norm(P[i] - c) >= spread_mm for c in cand): cand.append(P[i])
+            if len(cand) >= n_try: break
+        if not cand: return None, "no route from the skin reaches the region"
+        best = None
+        for c in cand:
+            self._check_stop()
+            res = self.plan_sequence((name,), [c], n_entries=2)
+            if res and (best is None or (res.feasible, -res.cost) > (best[1].feasible, -best[1].cost)): best = (c, res)
+        if best is None: return cand[0], "no smooth path found yet - using the easiest point of the region"
+        c, res = best
+        return c, (f"tip at ({c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f}), {'reachable' if res.feasible else 'not reachable yet'}"
+                   f", {len(cand)} point(s) of the region tried")
+
     # ------------------------------------------------------------------ several targets
     def plan_all(self, targets):
         """targets: {name: RAS mm}. Returns (chosen paths, names not reachable, all evaluated candidates)."""

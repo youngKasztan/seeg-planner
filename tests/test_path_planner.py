@@ -4,11 +4,12 @@ Continuum-robot path planner on a synthetic head (no patient data needed):  pyth
   2. two targets on one vertical line: the planner must reach both with ONE path
   3. a target inside a no-go zone is reported, not planned
   ... 8. electrode contacts every 5 mm from the tip; a target 20 mm above the tip lies on contact 5
+  9. target region from two outlines (axial square + coronal square = a cube); the planner puts the tip inside it
 """
 import os, sys, tempfile
 import numpy as np, nibabel as nib
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "path_planner"))
-import config, patient, planner, electrode
+import config, patient, planner, electrode, regions
 
 def synthetic_patient(folder):
     N = 101; aff = np.diag([1.0, 1, 1, 1]); aff[:3, 3] = -50                  # 1 mm grid, centre (0, 0, 0)
@@ -99,4 +100,22 @@ with tempfile.TemporaryDirectory() as d:
     assert np.allclose(gaps, cfg["electrode"]["contact_spacing_mm"], atol=0.05)
     assert c.on_target["V"][0] == 1 and c.on_target["V"][1] < 0.05 and c.on_target["U"][0] == 5 and c.on_target["U"][1] < 0.05
     assert c.on_target["off"][1] > 2.4 and c.centres[:, 2].max() <= 40 - cfg["robot"]["straight_entry_mm"] + 1e-6
+
+    # 9. target region: outline 10x10 voxels in the axial view and 10x6 in the coronal view -> a 10 x 10 x 6 box
+    reg = regions.Region("R1", regions.COLOURS[0])
+    sq = lambda a, b, c, d: np.array([[a, c], [b, c], [b, d], [a, d]], float)
+    reg.set_outline(2, 50, sq(29.5, 39.5, 34.5, 44.5))             # axial: u = x index, v = y index
+    m1 = reg.build(pt.shape, pt.vox).copy()
+    reg.set_outline(1, 40, sq(29.5, 39.5, 47.5, 53.5))             # coronal: u = x index, v = z index
+    m = reg.build(pt.shape, pt.vox, clip=pt.brain)
+    box = np.argwhere(m)
+    print(f"9. region: one outline {m1.sum()} voxels (slab), two outlines {m.sum()} voxels, "
+          f"extent {box.min(0)}-{box.max(0)}")
+    assert m.sum() == 10 * 10 * 6 and m1.sum() == 10 * 10 * 5
+    back = regions.Region.from_json(reg.to_json(pt.vox_to_mm), pt.mm_to_vox); back.build(pt.shape, pt.vox, clip=pt.brain)
+    assert (back.mask == m).all()
+    tip, msg = pl.region_tip("R1", m)
+    ti = np.round(pt.mm_to_vox(tip)).astype(int)
+    print(f"   region tip {np.round(tip, 1)} ({msg})")
+    assert tip is not None and m[tuple(ti)]
 print("OK")

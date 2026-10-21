@@ -21,6 +21,17 @@ The headset only displays the result (brain + paths); all planning happens here.
      amygdala, thalamus, basal ganglia, skull estimate, scalp. Structures that are already a zone
      (ventricles, vessels, eloquent cortex, tracts ...) are shown from their zone row, not twice.
      [PRIOR] / [ESTIMATE] / [atlas function] mark layers that are not measured in this patient
+   **Target regions** (doctors usually mark an area, not a point): press **Draw outline** (or *New region*),
+   hold the left mouse button and draw around the area on a slice of one view, then on a slice of a second view
+   (e.g. axial, then coronal; the other views jump to the region after the first outline). The region is where
+   the outlines overlap (each outline is extended through the volume along its view); with one outline only it
+   is a 5 mm slab. *Region only inside the brain* clips it to the brain. Drawing again in a view replaces that
+   outline. Regions are saved automatically to `regions.json` (outlines in RAS mm); *Save targets* also writes
+   `regions/<name>.nii.gz`. When planning, the robot tip may end **anywhere inside the region**: the planner takes
+   safe points at least 1.5 mm inside its edge, ranks them by the route cost from the skin (one Dijkstra from all
+   allowed entries), plans the 3 best in full and keeps the cheapest; then the region is planned like a point
+   target (also together with other targets on one path). The path list shows how many electrode contacts lie in
+   the region. The region is exported to the headset as layer `region_<name>` (group *Target regions*).
 3. **Plan paths** - for every target, and for groups of 2-3 nearby targets, the planner looks for a path;
    it then decides itself how many insertions are needed (one path through several targets when that is safe).
    Every target alone takes ~10-20 s. Groups are tried after that, most promising first, until

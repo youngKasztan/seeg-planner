@@ -3,11 +3,12 @@ Continuum-robot path planner on a synthetic head (no patient data needed):  pyth
   1. an artery runs right above a target: the path must keep the margin and never bend tighter than the robot allows
   2. two targets on one vertical line: the planner must reach both with ONE path
   3. a target inside a no-go zone is reported, not planned
+  ... 8. electrode contacts every 5 mm from the tip; a target 20 mm above the tip lies on contact 5
 """
 import os, sys, tempfile
 import numpy as np, nibabel as nib
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "path_planner"))
-import config, patient, planner
+import config, patient, planner, electrode
 
 def synthetic_patient(folder):
     N = 101; aff = np.diag([1.0, 1, 1, 1]); aff[:3, 3] = -50                  # 1 mm grid, centre (0, 0, 0)
@@ -89,4 +90,13 @@ with tempfile.TemporaryDirectory() as d:
     left = np.array([[-30.0, 10.0, 0.0]]) + np.array([[1.0, 0, 0]]) * np.linspace(0, 20, 41)[:, None]
     print(f"7. midline zone: crossing line min clearance {pt7.C_strict(cross).min():.1f} mm, left-only line {pt7.C_strict(left).min():.1f} mm")
     assert pt7.C_strict(cross).min() < 0 < pt7.C_strict(left).min()
+
+    # 8. electrode contacts: every 5 mm of arc length from the tip, none in the straight entry
+    straight = line([0, 0, 40], [0, 0, 0], ["U", "V"], 0)          # vertical, tip (V) at z=0, U 20 mm above
+    c = electrode.contacts(straight.points, cfg, {"U": [0, 0, 20.0], "V": [0, 0, 0.0], "off": [0, 0, 12.5]})
+    gaps = np.linalg.norm(np.diff(c.centres, axis=0), axis=1)
+    print(f"8. {len(c.centres)} contacts, spacing {gaps.min():.2f}-{gaps.max():.2f} mm, on targets {c.on_target}")
+    assert np.allclose(gaps, cfg["electrode"]["contact_spacing_mm"], atol=0.05)
+    assert c.on_target["V"][0] == 1 and c.on_target["V"][1] < 0.05 and c.on_target["U"][0] == 5 and c.on_target["U"][1] < 0.05
+    assert c.on_target["off"][1] > 2.4 and c.centres[:, 2].max() <= 40 - cfg["robot"]["straight_entry_mm"] + 1e-6
 print("OK")

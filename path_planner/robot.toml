@@ -12,6 +12,14 @@ straight_entry_mm   = 15.0    # first part is straight (through skin and bone, a
 max_entry_angle_deg = 30.0    # angle between the robot and the skin normal at the entry point
 max_total_turn_deg  = 150.0   # total change of direction along one path
 
+[electrode]                   # SEEG electrode carried by the robot: recording contacts, not one continuous conductor
+contact_spacing_mm = 5.0      # centre-to-centre distance between neighbouring contacts, along the path
+contact_length_mm  = 2.0      # length of one contact (drawn as a band on the path)
+first_contact_mm   = 0.0      # centre of contact 1 measured back from the tip (the tip sits on the last target)
+n_contacts         = 0        # number of contacts; 0 = along the whole path up to the straight entry
+on_target_mm       = 1.5      # a target counts as recorded when a contact centre is at most this far from it
+                              # (half a contact + 0.5 mm); a target between two contacts is shown in red
+
 [planning]
 search_grid_mm        = 2.0   # resolution of the coarse route search
 sample_step_mm        = 1.0   # how densely a path is checked

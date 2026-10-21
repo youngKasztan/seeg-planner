@@ -3,11 +3,15 @@ export.py - write the planned paths for the headset app.
 
   <headset>/plan.json   targets and paths (RAS mm and headset scene metres), robot settings, checks
   <headset>/paths.glb   tubes along the paths (robot diameter) + target spheres, in the same coordinates as
-                        patient_scene.glb, so the headset shows them inside the brain (PatientLoader loads it)
+                        patient_scene.glb, so the headset shows them inside the brain (PatientLoader loads it);
+                        electrode contacts as bands on the tubes: node path_<n>_contacts (silver) and
+                        path_<n>_contacts_on_target (green = a contact lying on a target)
 """
 import json, os
 import numpy as np
 import trimesh
+
+import electrode
 
 R = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], float)          # RAS -> glTF (Y up), as in tools/export_headset.py
 COLOURS = [(0.1, 0.8, 1.0), (1.0, 0.55, 0.1), (0.7, 0.3, 1.0), (0.2, 1.0, 0.4), (1.0, 0.3, 0.6)]
@@ -33,6 +37,16 @@ def tube(points, radius, sides=12):
     cap = trimesh.creation.icosphere(2, radius); cap.apply_translation(P[-1])          # rounded tip
     return trimesh.util.concatenate([m, cap])
 
+def contact_bands(c, radius, length, sel):
+    """One mesh (RAS mm) of short cylinders around the path at the selected contacts."""
+    parts = []
+    for j in sel:
+        cyl = trimesh.creation.cylinder(radius=radius, height=length, sections=16)
+        T = trimesh.geometry.align_vectors([0, 0, 1.0], c.tangents[j]); T[:3, 3] = c.centres[j]
+        cyl.apply_transform(T); parts.append(cyl)
+    return trimesh.util.concatenate(parts) if parts else None
+
+
 def export(headset_dir, paths, targets, cfg, centre, uncovered=(), target_problems=None):
     os.makedirs(headset_dir, exist_ok=True)
     sc = lambda p: np.round(to_scene(p, centre), 5).tolist()
@@ -53,13 +67,28 @@ def export(headset_dir, paths, targets, cfg, centre, uncovered=(), target_proble
         m.visual = trimesh.visual.TextureVisuals(material=trimesh.visual.material.PBRMaterial(
             name=f"path_{i + 1}", baseColorFactor=[*col, 1.0], metallicFactor=0.1, roughnessFactor=0.4))
         scene.add_geometry(m, node_name=f"path_{i + 1}", geom_name=f"path_{i + 1}")
+        c = electrode.for_path(r, cfg, targets); es = electrode.settings(cfg)
+        for suffix, sel, rgba in (("contacts", [j for j in range(len(c.centres)) if j not in c.hits], [0.85, 0.85, 0.9, 1.0]),
+                                  ("contacts_on_target", sorted(c.hits), [0.2, 1.0, 0.2, 1.0])):
+            band = contact_bands(c, rad * 1.4, es["contact_length_mm"], sel)
+            if band is None: continue
+            band.vertices = to_scene(band.vertices, centre)
+            band.visual = trimesh.visual.TextureVisuals(material=trimesh.visual.material.PBRMaterial(
+                name=f"path_{i + 1}_{suffix}", baseColorFactor=rgba, metallicFactor=0.3, roughnessFactor=0.4))
+            scene.add_geometry(band, node_name=f"path_{i + 1}_{suffix}", geom_name=f"path_{i + 1}_{suffix}")
         out["paths"].append({
             "id": f"path_{i + 1}", "targets": r.targets, "colour": col,
             "entry_ras_mm": np.round(r.entry, 2).tolist(), "entry_scene_m": sc(r.entry),
             "points_ras_mm": np.round(r.points, 2).tolist(), "points_scene_m": sc(r.points),
             "length_mm": round(r.length_mm, 1), "min_bend_radius_mm": round(r.min_radius_mm, 1),
             "entry_angle_deg": round(r.entry_angle_deg, 1), "total_turn_deg": round(r.total_turn_deg, 1),
-            "min_clearance_mm": r.min_clearance_mm, "feasible": r.feasible, "problems": r.problems})
+            "min_clearance_mm": r.min_clearance_mm, "feasible": r.feasible, "problems": r.problems,
+            "electrode": {"contact_spacing_mm": es["contact_spacing_mm"], "contact_length_mm": es["contact_length_mm"],
+                          "contacts": [{"n": j + 1, "depth_from_tip_mm": round(float(c.depth_mm[j]), 1),
+                                        "ras_mm": np.round(c.centres[j], 2).tolist(), "scene_m": sc(c.centres[j]),
+                                        "on_target": j in c.hits} for j in range(len(c.centres))],
+                          "targets": {n: {"contact": k, "distance_mm": round(d, 2), "on_contact": d <= es["on_target_mm"]}
+                                      for n, (k, d) in c.on_target.items()}}})
     json.dump(out, open(os.path.join(headset_dir, "plan.json"), "w"), indent=1)
     if len(scene.geometry): scene.export(os.path.join(headset_dir, "paths.glb"))
     return os.path.join(headset_dir, "plan.json")

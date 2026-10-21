@@ -17,7 +17,7 @@ sys.path.insert(0, HERE)
 import config, labels, layers
 from patient import Patient
 from planner import Planner, Cancelled
-import export
+import export, electrode
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import matplotlib
@@ -131,6 +131,18 @@ class SliceView(QtWidgets.QWidget):
                 near = np.abs(d - k) <= 2.0
                 if near.any():
                     self.artists += self.ax.plot(np.where(near, pu, np.nan), np.where(near, pv, np.nan), color=col, lw=3)
+                if a.chk_contacts.isChecked():                     # electrode contacts on this slice
+                    c = electrode.for_path(r, a.cfg, a.targets)
+                    if len(c.centres):
+                        cu, cv, cd = self.uv(p.mm_to_vox(c.centres))
+                        on = np.abs(cd - k) <= 2.0
+                        hit = np.isin(np.arange(len(cu)), list(c.hits))
+                        sets = ((~on & ~hit, dict(s=8, marker="o", facecolors="white", edgecolors="none", alpha=0.45, zorder=3)),
+                                (on & ~hit, dict(s=26, marker="s", facecolors=col, edgecolors="white", linewidths=0.8, zorder=4)),
+                                (~on & hit, dict(s=40, marker="o", facecolors="none", edgecolors="#3f3", linewidths=1.0, alpha=0.6, zorder=6)),
+                                (on & hit, dict(s=90, marker="o", facecolors="none", edgecolors="#3f3", linewidths=2.0, zorder=7)))
+                        for m, style in sets:                      # faint = contact on another slice, bold = on this slice
+                            if m.any(): self.artists.append(self.ax.scatter(cu[m], cv[m], **style))
         for n, t in a.targets.items():
             tu, tv, td = self.uv(p.mm_to_vox(t)); inside = abs(td[0] - k) <= 2
             sel = a.current_target() == n
@@ -192,6 +204,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ltree.itemChanged.connect(self._layer_toggled); sl.addWidget(self.ltree, 5)
         self.chk_paths = QtWidgets.QCheckBox("Show paths"); self.chk_paths.setChecked(True)
         self.chk_paths.toggled.connect(self.redraw); sl.addWidget(self.chk_paths)
+        self.chk_contacts = QtWidgets.QCheckBox("Show electrode contacts"); self.chk_contacts.setChecked(True)
+        self.chk_contacts.setToolTip("Recording contacts of the electrode ([electrode] in robot.toml, default every 5 mm).\n"
+                                     "Squares = contacts on this slice, faint dots = contacts on other slices,\n"
+                                     "green ring = a contact that lies on a target.")
+        self.chk_contacts.toggled.connect(self._contacts_toggled); sl.addWidget(self.chk_contacts)
         self.btn_plan = QtWidgets.QPushButton("Plan paths"); self.btn_plan.setStyleSheet("font-weight: bold; padding: 8px")
         self.btn_plan.clicked.connect(self.plan)
         self.btn_stop = QtWidgets.QPushButton("Stop"); self.btn_stop.setEnabled(False)
@@ -200,7 +217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row = QtWidgets.QHBoxLayout(); row.addWidget(self.btn_plan, 1); row.addWidget(self.btn_stop); sl.addLayout(row)
         self.bar = QtWidgets.QProgressBar(); self.bar.setRange(0, 1000); sl.addWidget(self.bar)
         sl.addWidget(QtWidgets.QLabel("<b>Paths</b>"))
-        self.rlist = QtWidgets.QTreeWidget(); self.rlist.setHeaderLabels(["Path", "Length", "Min radius", "Closest no-go"])
+        self.rlist = QtWidgets.QTreeWidget(); self.rlist.setHeaderLabels(["Path", "Length", "Min radius", "Closest no-go", "Electrode contacts on targets"])
         self.rlist.setRootIsDecorated(False); sl.addWidget(self.rlist, 1)
         self.btn_export = QtWidgets.QPushButton("Export to headset"); self.btn_export.clicked.connect(self.export); sl.addWidget(self.btn_export)
         sl.addWidget(QtWidgets.QLabel("<b>Log</b>"))
@@ -453,18 +470,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(f"{len(self.paths)} path(s) for {len(self.targets)} target(s)")
         for n in self.uncovered:
             self._log(f"NOT REACHED: {n} - {self.planner.target_problems.get(n, 'no path satisfies all constraints')}")
+        for i, r in enumerate(self.paths):
+            c = electrode.for_path(r, self.cfg, self.targets)
+            self._log(f"  path {i + 1} electrode: {electrode.summary(c, self.cfg)}")
         self._refresh_paths(); self._update_3d_paths(); self.redraw()
+
+    def _contacts_toggled(self):
+        self._update_3d_paths(); self.redraw()
 
     def _refresh_paths(self):
         self.rlist.clear()
         nogo = [z for z in self.cfg.get("no_go", {}) if "outside_of" not in self.cfg["no_go"][z]]
         for i, r in enumerate(self.paths):
             close = min(((r.min_clearance_mm.get(z, 99), z) for z in nogo), default=(None, ""))
+            c = electrode.for_path(r, self.cfg, self.targets)
             it = QtWidgets.QTreeWidgetItem([f"{i + 1}: {' -> '.join(r.targets)}", f"{r.length_mm:.0f} mm",
-                                            f"{r.min_radius_mm:.0f} mm", f"{close[1]} {close[0]} mm"])
+                                            f"{r.min_radius_mm:.0f} mm", f"{close[1]} {close[0]} mm",
+                                            electrode.summary(c, self.cfg)])
             it.setForeground(0, QtGui.QColor.fromRgbF(*PATH_COLOURS[i % len(PATH_COLOURS)]))
+            if len(c.hits) < len(c.on_target): it.setForeground(4, QtGui.QColor("#f66"))
+            it.setToolTip(4, "#n = contact number from the tip (1 = deepest), then the distance from the target to its centre")
             self.rlist.addTopLevelItem(it)
-        for c in range(4): self.rlist.resizeColumnToContents(c)
+        for c in range(5): self.rlist.resizeColumnToContents(c)
 
     def headset_layers(self):
         """The app's layers for the headset model, in the order and groups of the layer list:
@@ -557,6 +584,11 @@ class MainWindow(QtWidgets.QMainWindow):
         for name in [n for n in self.view3d.items if n.startswith("path")]: self.view3d.remove(name)
         for i, r in enumerate(self.paths):
             self.view3d.add_line(f"path{i}", r.points, PATH_COLOURS[i % len(PATH_COLOURS)], width=4)
+            if self.chk_contacts.isChecked():
+                c = electrode.for_path(r, self.cfg, self.targets)
+                rest = [j for j in range(len(c.centres)) if j not in c.hits]
+                if rest: self.view3d.add_points(f"path{i}_contacts", c.centres[rest], (1.0, 1.0, 1.0), 7)
+                if c.hits: self.view3d.add_points(f"path{i}_hits", c.centres[sorted(c.hits)], (0.2, 1.0, 0.2), 13)
 
 # ---------------------------------------------------------------------------------------------- entry
 def selftest(folder):

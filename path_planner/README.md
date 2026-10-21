@@ -54,6 +54,18 @@ and soft zones (preferred distance). Edit, save, press **Reload robot.toml**. No
 Soft zones (allowed, the planner keeps away): veins (VENAT atlas PRIOR), deep grey nuclei (may be targets),
 sulci, eloquent cortex (DKT atlas), corticospinal tract, optic radiation, other tracts (DTI).
 
+## Electrode contacts
+The robot carries an SEEG electrode whose recording contacts are not continuous: there is one contact every
+`contact_spacing_mm` (default 5 mm, `[electrode]` in `robot.toml`). Contact 1 sits at the tip, on the last target
+of the path; the others follow back along the curved path every 5 mm of arc length (none in the straight entry
+through skin and bone). `electrode.py` computes them; the app shows them with **Show electrode contacts**:
+squares = contacts on the current slice, faint dots = contacts on other slices, green ring = a contact lying on a
+target (contact centre at most `on_target_mm` = 1.5 mm from it). The path list says which contact records each
+target and how far it is, e.g. `hip: #1 0.0 mm | amy: #4 0.8 mm`; a target that falls between two contacts is shown
+in red. The export writes the contacts into `plan.json` (per path: number, depth from the tip, position, on target)
+and as bands into `paths.glb` (`path_<n>_contacts` silver, `path_<n>_contacts_on_target` green), so the headset
+shows them too.
+
 ## How a path is found
 1. Coarse route on a 2 mm grid (minimum-cost path, `skimage.graph.MCP`): impassable in no-go zones,
    expensive near them and in soft zones.

@@ -150,6 +150,8 @@ namespace SeegPlanner
         {
             for (var p = t; p != null && p != PatientRoot; p = p.parent)
             {
+                if (p.name.EndsWith("_contacts_on_target")) return new Color(0.2f, 1f, 0.2f, 1f);   // electrode contact on a target
+                if (p.name.EndsWith("_contacts")) return new Color(0.85f, 0.85f, 0.9f, 1f);         // other electrode contacts
                 if (colours.TryGetValue(p.name, out var c)) return c;
                 if (p.name.StartsWith("target_")) return targetColour;
             }

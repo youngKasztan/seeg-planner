@@ -1,15 +1,17 @@
 """
-planner.py - curved path planning for a continuum robot.
+planner.py - path planning for a concentric-tube continuum robot (shape: robot_model.py).
 
-For one ordered list of targets the planner
+The robot is pushed in straight first (any length), then two pre-curved tubes come out: arc 1 and arc 2,
+each a circular arc of at most 35 mm with its own minimum radius and its own bending plane. For one ordered
+list of targets the planner
   1. finds a coarse collision-free route on a grid (Dijkstra / minimum-cost path, skimage.graph.MCP):
      cheap where the brain is far from no-go zones, impassable inside them;
-  2. turns it into a smooth robot path: a straight entry part (through skin and bone) followed by a cubic
-     spline through the targets, and optimises the spline so that it
-       - keeps the robot body out of every no-go zone (hard),
-       - never bends tighter than the robot's minimum bend radius (hard),
-       - respects the entry angle, total turning and maximum length (hard),
-       - is short, sweeping (low curvature) and far from soft zones (cost);
+  2. fits the robot shape to that route and optimises it (Powell, penalty continuation). The shape is built
+     backwards from the last target (tip direction -> arc 2 -> arc 1 -> straight back to the skin), so the tip
+     is exactly on the target; the variables are the tip direction and length, curvature and plane of each arc.
+     Hard limits: no-go clearance, arcs inside the brain, entry on the allowed skin zone, entry angle, straight
+     part >= min_straight_mm, total length, earlier targets within target_pass_mm of the robot.
+     Cost: length + soft zones + curvature_weight * bending (wide arcs preferred);
   3. checks the result against all hard limits; a path that fails any of them is rejected.
 
 Several targets: every target alone, plus ordered groups of 2-3 nearby targets on one path, are planned;
@@ -25,33 +27,14 @@ import itertools, time
 from dataclasses import dataclass, field
 import numpy as np
 from scipy import ndimage
-from scipy.interpolate import CubicSpline   # noqa: F401  (reference implementation, see clamped_spline)
-from scipy.optimize import minimize
+import warnings
+from scipy.optimize import minimize, OptimizeWarning
+warnings.filterwarnings("ignore", category=OptimizeWarning)   # Powell: start point on a bound is fine
 from skimage.graph import MCP_Geometric
+from scipy.spatial import cKDTree
 
-def clamped_spline(s, P, u, ss):
-    """Cubic spline through points P (n+1 x 3) at parameters s, first derivative u at the start and zero second
-    derivative at the end; returns position, 1st and 2nd derivative at ss.
-    Same result as scipy CubicSpline(s, P, bc_type=((1, u), (2, 0))) but ~5x faster for the few knots used here
-    (the optimiser evaluates it ~10 000 times per path)."""
-    n = len(s) - 1
-    h = np.diff(s); dlt = np.diff(P, axis=0) / h[:, None]
-    A = np.zeros((n + 1, n + 1)); B = np.empty((n + 1, 3))
-    A[0, 0] = 1.0; B[0] = u                                         # clamped start: slope = u
-    if n > 1:                                                       # continuity of the 2nd derivative
-        i = np.arange(1, n)
-        A[i, i - 1], A[i, i], A[i, i + 1] = h[1:], 2 * (h[:-1] + h[1:]), h[:-1]
-        B[1:n] = 3 * (h[1:, None] * dlt[:-1] + h[:-1, None] * dlt[1:])
-    A[n, n - 1], A[n, n] = 1.0, 2.0; B[n] = 3 * dlt[n - 1]           # natural end: 2nd derivative = 0
-    m = np.linalg.solve(A, B)                                       # slopes at the knots
-    c2 = (3 * dlt - 2 * m[:-1] - m[1:]) / h[:, None]
-    c3 = (m[:-1] + m[1:] - 2 * dlt) / (h ** 2)[:, None]
-    i = np.clip(np.searchsorted(s, ss, side="right") - 1, 0, n - 1)
-    x = (ss - s[i])[:, None]
-    r = P[i] + m[i] * x + c2[i] * x ** 2 + c3[i] * x ** 3
-    d1 = m[i] + 2 * c2[i] * x + 3 * c3[i] * x ** 2
-    d2 = 2 * c2[i] + 6 * c3[i] * x
-    return r, d1, d2
+import robot_model
+from patient import Field
 
 @dataclass
 class PathResult:
@@ -61,11 +44,13 @@ class PathResult:
     feasible: bool
     cost: float
     length_mm: float
-    min_radius_mm: float
+    min_radius_mm: float             # tightest arc used (1e9 = straight only)
     entry_angle_deg: float
-    total_turn_deg: float
+    total_turn_deg: float            # arc 1 + arc 2 bending angle
     min_clearance_mm: dict = field(default_factory=dict)   # zone -> closest approach of the robot SURFACE
     problems: list = field(default_factory=list)
+    labels: np.ndarray = None        # per point: 0 = straight, 1 = arc 1, 2 = arc 2 (robot_model)
+    shape: dict = field(default_factory=dict)              # straight length, arc lengths, radii and planes
 
 class Cancelled(Exception):
     """Raised when the user stops the planning."""
@@ -78,6 +63,8 @@ class Planner:
         self._build_search_grid()
         self._build_entries()
         self.mcp = {}
+        self.head_f = Field(self.p.head.astype(np.float32), self.p.affine, 0.0)   # where the straight part leaves the head
+        self.entry_tree = cKDTree(self.entry_pts) if len(self.entry_pts) else cKDTree(np.zeros((1, 3)) + 1e6)
 
     # ------------------------------------------------------------------ coarse grid
     def _build_search_grid(self):
@@ -165,69 +152,84 @@ class Planner:
         path = m.traceback(tuple(start_idx))                       # target ... start
         return self.g_mm(np.array(path[::-1]).T).T
 
-    # ------------------------------------------------------------------ smooth robot path
-    def _spline(self, x, E, frame, waypoints, n_free):
-        """Decode optimisation variables into the sampled robot path."""
-        ax, ay = x[0], x[1]
-        nin, e1, e2 = frame
-        u = nin + ax * e1 + ay * e2; u /= np.sqrt(u @ u)
-        Ls = self.robot["straight_entry_mm"]
-        S = E + u * Ls
-        free = x[2:].reshape(-1, 3)
-        pts, k = [S[None]], 0
-        for wp, nf in zip(waypoints, n_free):
-            pts += [free[k:k + nf], np.asarray(wp, float)[None]]; k += nf
-        P = np.concatenate(pts)
-        seg = np.sqrt((np.diff(P, axis=0) ** 2).sum(1))
-        if np.any(seg < 1e-3): seg = np.maximum(seg, 1e-3)
-        s = np.concatenate([[0], np.cumsum(seg)])
-        if not np.isfinite(s[-1]) or s[-1] > 5 * self.robot["max_length_mm"]: return None   # diverged
+    # ------------------------------------------------------------------ robot shape: straight + arc 1 + arc 2
+    def _shape(self, x, tip, frame, via=None):
+        """Decode x = [a, b, L2, k2, phi2, L1, k1, phi1] into the robot shape that ends exactly at tip.
+        frame = (d0, e1, e2): the back direction at the tip is d0 + a e1 + b e2 (normalised).
+        via (a target before the tip): arc 2 is the circular arc from the tip that passes exactly through via
+        (fixed by the tip direction), so x = [a, b, L1, k1, phi1]; arc 2 beyond the robot's limits is reported
+        in 'over' and penalised."""
+        d0, e1, e2 = frame
+        v = d0 + x[0] * e1 + x[1] * e2; v = v / np.linalg.norm(v)
+        (L1max, k1max), (L2max, k2max) = robot_model.arc_limits(self.robot)
         step = self.pl["sample_step_mm"]
-        ss = np.linspace(0, s[-1], max(int(s[-1] / step) + 2, 4))
-        r, d1, d2 = clamped_spline(s, P, u, ss)
-        sp = np.sqrt((d1 ** 2).sum(1))
-        cr = d1[:, [1, 2, 0]] * d2[:, [2, 0, 1]] - d1[:, [2, 0, 1]] * d2[:, [1, 2, 0]]   # cross product
-        kappa = np.sqrt((cr ** 2).sum(1)) / np.maximum(sp, 1e-6) ** 3
-        straight = E + u[None] * np.linspace(0, Ls, max(int(Ls / step), 2))[:, None]
-        dl = np.sqrt((np.diff(r, axis=0) ** 2).sum(1))
-        length = Ls + dl.sum()
-        turn = np.sum(0.5 * (kappa[1:] + kappa[:-1]) * dl)
-        return straight, r, kappa, dl, u, length, turn
+        over = 0.0
+        if via is None:
+            L2, k2, phi2 = np.clip(x[2], 0, L2max), np.clip(x[3], 0, k2max), x[4]
+            L1, k1, phi1 = np.clip(x[5], 0, L1max), np.clip(x[6], 0, k1max), x[7]
+        else:
+            w = np.asarray(via, float) - tip; c = float(np.linalg.norm(w))
+            cth = float(np.clip(v @ w / c, -1, 1)); th = float(np.arccos(cth))
+            if th < 1e-4: k2, L2, phi2 = 0.0, c, 0.0
+            else:
+                perp = w - cth * c * v
+                Rr = c / (2 * np.sin(th)); k2, L2 = 1.0 / Rr, 2 * th * Rr
+                phi2 = self._phi_for(v, perp / np.linalg.norm(perp))
+            over = max(0.0, k2 / k2max - 1.0) * 10.0 + max(0.0, L2 - L2max) / 5.0
+            if L2 > 3 * (L1max + L2max): return None
+            L1, k1, phi1 = np.clip(x[2], 0, L1max), np.clip(x[3], 0, k1max), x[4]
+        p2, v1 = robot_model.arc(np.asarray(tip, float), v, k2, L2, phi2, step)
+        p1, vb = robot_model.arc(p2[-1], v1, k1, L1, phi1, step)
+        P0 = p1[-1]
+        # straight part: from the start of arc 1 straight back until it leaves the head = the skin entry
+        t = np.arange(0.0, self.robot["max_length_mm"] + 1.0, 0.5)
+        h = self.head_f(P0 + np.outer(t, vb))
+        out = np.where(h < 0.5)[0]
+        if not len(out): return None                                   # never leaves the head: far too long
+        i = out[0]
+        if i == 0: L0 = 0.0
+        else: L0 = t[i - 1] + (h[i - 1] - 0.5) / max(h[i - 1] - h[i], 1e-9) * (t[i] - t[i - 1])
+        entry = P0 + vb * L0
+        pts, lab = robot_model.assemble(entry, P0, p1, p2, step)
+        return dict(points=pts, labels=lab, entry=entry, u=-vb, L=(L0, L1, L2), k=(k1, k2), phi=(phi1, phi2), over=over)
 
-    def _evaluate(self, x, E, frame, waypoints, n_free, targets_mm, detail=False, w=1.0):
+    def _evaluate(self, x, tip, frame, targets_mm, detail=False, w=1.0, via=None):
         p, rb = self.p, self.robot
-        sp = self._spline(x, E, frame, waypoints, n_free)
-        if sp is None:
-            if detail: return None
-            return 1e9
-        straight, r, kappa, dl, u, length, turn = sp
+        sh = self._shape(x, tip, frame, via)
+        if sh is None: return None if detail else 1e9
+        r, lab = sh["points"], sh["labels"]
+        L0, L1, L2 = sh["L"]; k1, k2 = sh["k"]
         tol = self.pl["target_tolerance_mm"]
         near = np.min(np.linalg.norm(r[:, None, :] - targets_mm[None], axis=2), axis=1) < tol
-        ns = len(straight)
-        st, ig, ou, so = p.sample(np.vstack([straight, r]))         # one coordinate transform for all fields
-        c_str_s, c_ign_s, soft_s = st[:ns], ig[:ns], so[:ns]
-        c_str, c_ign, c_out, soft_r = st[ns:], ig[ns:], ou[ns:], so[ns:]
+        c_str, c_ign, c_out, soft = p.sample(r)
         inside = np.where(c_out > 0)[0]
-        first_in = inside[0] if len(inside) else len(r)            # once inside the brain, stay inside
-        c_out_eff = np.where(np.arange(len(r)) >= first_in, c_out, 1e3)
+        first_in = inside[0] if len(inside) else len(r)               # once inside the brain, stay inside;
+        must_in = (np.arange(len(r)) >= first_in) | (lab > 0)          # the arcs are always inside the brain
+        c_out_eff = np.where(must_in, c_out, 1e3)
         c_eff = np.minimum(c_str, np.where(near, 1e3, np.minimum(c_ign, c_out_eff)))
-        c_ent = np.minimum(c_str_s, c_ign_s)
-        b = 0.0 if detail else 0.5                                  # optimise with a small safety buffer
-        viol = np.sum(np.clip(b - c_eff, 0, None) ** 2) + np.sum(np.clip(b - c_ent, 0, None) ** 2)
-        kmax = (1.0 if detail else 0.93) / rb["min_bend_radius_mm"]
-        kviol = np.sum((np.clip(kappa - kmax, 0, None) / kmax) ** 2)
-        ang = np.degrees(np.arccos(np.clip(u @ frame[0], -1, 1)))
+        b = 0.0 if detail else 0.5                                    # optimise with a small safety buffer
+        viol = np.sum(np.clip(b - c_eff, 0, None) ** 2)
+        # entry: on an allowed part of the skin (nearest allowed entry point), angle to the skin normal
+        de, j = self.entry_tree.query(sh["entry"])
+        eviol = max(0.0, de - 1.5 * self.pl["search_grid_mm"]) ** 2
+        ang = np.degrees(np.arccos(np.clip(sh["u"] @ -self.entry_n[j], -1, 1)))
         aviol = max(0.0, ang - rb["max_entry_angle_deg"]) ** 2
+        length = L0 + L1 + L2
         lviol = max(0.0, length - rb["max_length_mm"]) ** 2
-        turn_deg = np.degrees(turn)
-        tviol = max(0.0, turn_deg - rb["max_total_turn_deg"]) ** 2
-        soft = np.sum(soft_r[:-1] * dl) + np.sum(soft_s) * self.pl["sample_step_mm"]
-        smooth = rb["min_bend_radius_mm"] ** 2 * np.sum(kappa[:-1] ** 2 * dl)  # prefers wide, sweeping curves
-        cost = length + soft + self.pl.get("curvature_weight", 0.5) * smooth
-        f = cost + w * (200.0 * viol + 500.0 * kviol + 5.0 * aviol + 2.0 * lviol + 1.0 * tviol)
+        sviol = max(0.0, robot_model.min_straight(rb) - L0) ** 2
+        # earlier targets of the sequence must lie on the robot
+        miss = [float(np.min(np.linalg.norm(r - t, axis=1))) for t in targets_mm[:-1]]
+        mviol = sum(max(0.0, m - 0.3) ** 2 for m in miss)
+        dl = np.linalg.norm(np.diff(r, axis=0), axis=1)
+        soft_cost = np.sum(0.5 * (soft[1:] + soft[:-1]) * dl)
+        R1 = 1.0 / robot_model.arc_limits(rb)[0][1]
+        bend = R1 ** 2 * (k1 ** 2 * L1 + k2 ** 2 * L2)                 # prefers wide arcs (large radius)
+        cost = length + soft_cost + self.pl.get("curvature_weight", 0.5) * bend
+        oviol = sh["over"] ** 2                                        # arc 2 to the 'via' target beyond the limits
+        f = cost + w * (200.0 * viol + 20.0 * eviol + 5.0 * aviol + 2.0 * lviol + 5.0 * sviol + 200.0 * mviol + 200.0 * oviol)
         if not detail: return f
-        return dict(cost=cost, viol=viol, kappa_max=kappa.max(), angle=ang, length=length, turn=turn_deg,
-                    points=np.vstack([straight, r[1:]]), min_c=min(c_eff.min(), c_ent.min()))
+        return dict(cost=cost, viol=viol, angle=ang, length=length, points=r, labels=lab, entry=sh["entry"],
+                    entry_dist=de, L=sh["L"], k=sh["k"], phi=sh["phi"], miss=miss, min_c=float(c_eff.min()))
 
     def plan_sequence(self, names, tips, n_entries=None, n_straight=2, first_feasible=False):
         """Best feasible path that reaches the given targets in this order (or the best infeasible attempt).
@@ -259,6 +261,27 @@ class Planner:
             if i in used: continue                                  # same straight line already tried
             starts.append((i, self.entry_pts[i] + (tips[0] - self.entry_pts[i]) * np.linspace(0, 1, 40)[:, None]))
         best, self.last_alternatives = None, []
+        if len(tips) > 1:                                           # several targets: exact arc shapes first
+            for init in self._arc_inits(tips):
+                self._check_stop()
+                res = self._optimise(names, tips, None, None, None, init=init)
+                if res and (best is None or (res.feasible, -res.cost) > (best.feasible, -best.cost)): best = res
+                if res and res.feasible: self.last_alternatives.append(res)
+                if first_feasible and best is not None and best.feasible: return best
+            # P = second-to-last target, where arc 1 meets arc 2: the robot may already be curved when it passes P
+            mR, cumR = (self._mcp(names[-2], tips[-2]) if len(tips) == 2 else (m0, cum0))
+            ecR = cumR[tuple(self.entry_idx.T)]; viaE = []
+            for i in np.argsort(ecR):
+                if not np.isfinite(ecR[i]): break
+                if all(np.linalg.norm(self.entry_pts[i] - self.entry_pts[j]) > 25 for j in viaE): viaE.append(i)
+                if len(viaE) >= 2: break
+            for i in viaE:
+                self._check_stop()
+                route = np.vstack([self._route(mR, self.entry_idx[i])] + legs[:-1])   # skin -> ... -> P
+                res = self._optimise_via(names, tips, self.entry_pts[i], route)
+                if res and (best is None or (res.feasible, -res.cost) > (best.feasible, -best.cost)): best = res
+                if res and res.feasible: self.last_alternatives.append(res)
+                if first_feasible and best is not None and best.feasible: return best
         for i, route0 in starts:
             self._check_stop()
             res = self._optimise(names, tips, self.entry_pts[i], self.entry_n[i], [route0] + legs)
@@ -266,6 +289,55 @@ class Planner:
             if res and res.feasible: self.last_alternatives.append(res)
             if first_feasible and best is not None and best.feasible: break
         return best
+
+    @staticmethod
+    def _phi_for(v, b):
+        """Plane angle phi (robot_model.arc) that makes an arc starting with tangent v bend towards b."""
+        n0 = robot_model._perp(v)
+        return float(np.arctan2(b @ np.cross(v, n0), b @ n0))
+
+    def _arc_inits(self, tips, n=6, keep=3):
+        """Exact starting shapes for one path through several targets: a straight line through the earlier targets
+        (pushed in from an allowed entry, or along the line of the first two targets for three), then one circular
+        arc - split over arc 2 and arc 1 - that ends exactly on the last target. -> [(frame, x0)], best first."""
+        (L1max, k1max), (L2max, k2max) = robot_model.arc_limits(self.robot)
+        T, P = np.asarray(tips[-1], float), np.asarray(tips[-2], float)
+        if len(tips) >= 3:
+            d = P - np.asarray(tips[-3], float); dirs = [d / np.linalg.norm(d)]
+        else:
+            # entries whose straight line through P can still bend onto T with the tightest arc
+            Lpt = float(np.linalg.norm(T - P))
+            amax = float(np.degrees(np.arcsin(min(1.0, Lpt * k2max / 2)))) + 2.0
+            dirs = [(P - self.entry_pts[i]) / np.linalg.norm(P - self.entry_pts[i])
+                    for i in self._straight_entries(P, n, along=P - T, max_angle_deg=amax)]
+        cands = []
+        for d in dirs:
+            for t in (0.0, 4.0, 8.0, 12.0):                         # the arc starts at P or a little after it
+                S = P + d * t
+                c = T - S; L = float(np.linalg.norm(c))
+                if L < 1.0: continue
+                u = c / L; cth = float(np.clip(d @ u, -1, 1)); th = float(np.arccos(cth))
+                if th < 1e-3: k, s_len, nc = 0.0, L, robot_model._perp(d)
+                else:
+                    perp = u - cth * d; nc = perp / np.linalg.norm(perp)
+                    Rr = L / (2 * np.sin(th)); k, s_len = 1.0 / Rr, 2 * th * Rr
+                if k > k2max * 1.0001 or s_len > L1max + L2max: continue
+                L2 = min(s_len, L2max); L1 = s_len - L2
+                if L1 > 1e-6 and k > k1max * 1.0001: continue          # arc 1 cannot bend this tightly
+                v_tip = np.cos(2 * th) * d + np.sin(2 * th) * nc if k > 0 else d
+                v = -v_tip / np.linalg.norm(v_tip)
+                if k > 0:
+                    C = S + nc / k                                     # circle centre
+                    phi2 = self._phi_for(v, (C - T) * k)
+                    p2, v1 = robot_model.arc(T, v, k, L2, phi2)
+                    phi1 = self._phi_for(v1, (C - p2[-1]) * k)
+                else: phi2 = phi1 = 0.0
+                e1 = robot_model._perp(v); frame = (v, e1, np.cross(v, e1))
+                x0 = np.array([0, 0, L2, k, phi2, L1, min(k, k1max), phi1], float)
+                f = self._evaluate(x0, T, frame, np.array(tips, float), w=1.0)
+                cands.append((f, frame, x0))
+        cands.sort(key=lambda c: c[0])
+        return [(fr, x0) for _, fr, x0 in cands[:keep]]
 
     def alternatives(self, k=3, min_entry_gap_mm=15.0):
         """Up to k feasible results of the last plan_sequence, cheapest first, with entries at least
@@ -279,7 +351,7 @@ class Planner:
     def _check_stop(self):
         if self.should_stop(): raise Cancelled()
 
-    def _straight_entries(self, tip, n, along=None):
+    def _straight_entries(self, tip, n, along=None, max_angle_deg=30.0):
         """Entries from which a straight line to the target is already safe (best = short + far from soft zones).
         along: preferred direction from the target back to the entry (within 30 deg), for paths through several targets."""
         E, N = self.entry_pts, self.entry_n
@@ -287,7 +359,7 @@ class Planner:
         ang = np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", u, -N), -1, 1)))
         keep = (L < self.robot["max_length_mm"]) & (ang < self.robot["max_entry_angle_deg"])
         if along is not None:
-            a = along / np.linalg.norm(along); keep &= (-u @ a) > np.cos(np.radians(30))
+            a = along / np.linalg.norm(along); keep &= (-u @ a) > np.cos(np.radians(max_angle_deg))
         sel = np.where(keep)[0]
         if not len(sel): return []
         t = np.linspace(0, 1, 100)
@@ -338,83 +410,136 @@ class Planner:
         a, b = np.asarray(a, float), np.asarray(b, float)
         d = np.linalg.norm(b - a)
         if d < 1e-6: return True
-        R = self.robot["min_bend_radius_mm"] / 1.03                 # the same tolerance as the final check
+        R = 1.0 / max(k for _, k in robot_model.arc_limits(self.robot))  # tightest arc of the robot
         theta = np.degrees(np.arcsin(min(1.0, d / (2 * R)))) + 10.0
         V = self._arrival_dirs(a)
         if not len(V): return False
         ang = np.degrees(np.arccos(np.clip((-V) @ ((b - a) / d), -1, 1)))
         return bool(ang.min() <= theta)
 
-    def _optimise(self, names, tips, E, nrm, routes):
-        nin = -nrm
-        a = np.cross(nin, [1, 0, 0]); a = a if np.linalg.norm(a) > 0.1 else np.cross(nin, [0, 1, 0])
-        e1 = a / np.linalg.norm(a); e2 = np.cross(nin, e1); frame = (nin, e1, e2)
-        Ls = self.robot["straight_entry_mm"]
-        # initial entry direction: towards the coarse route ~ Ls + 10 mm in, clamped to the allowed angle
-        r0 = routes[0]; d = np.linalg.norm(r0 - E, axis=1)
-        aim = r0[min(np.searchsorted(d, Ls + 10), len(r0) - 1)] - E; aim /= np.linalg.norm(aim)
-        t = np.tan(np.radians(min(np.degrees(np.arccos(np.clip(aim @ nin, -1, 1))), self.robot["max_entry_angle_deg"] * 0.8)))
-        lat = aim - (aim @ nin) * nin; lat = lat / max(np.linalg.norm(lat), 1e-9)
-        x0 = [t * (lat @ e1), t * (lat @ e2)]
-        n_free, ctrl = [], []
-        for k, route in enumerate(routes):
-            if k == 0:                                               # skip the part covered by the straight entry
-                route = route[np.linalg.norm(route - E, axis=1) > Ls]
-            L = np.sum(np.linalg.norm(np.diff(route, axis=0), axis=1)) if len(route) > 1 else 0
-            nf = int(np.clip(round(L / 20.0), 2, 5))      # one free point per ~20 mm of route
-            if len(route) < 2: route = np.array([E + nin * Ls, tips[k]])
-            cl = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))])
-            leg = [route[np.argmin(np.abs(cl - cl[-1] * j / (nf + 1)))] for j in range(1, nf + 1)]
-            # the last free point sets the final approach: put it on a collision-free straight line to the target,
-            # as close as possible to the direction the coarse route comes from
-            free = self._free_dirs(np.asarray(tips[k], float))
-            if len(free) and cl[-1] > 12:
-                back = route[np.argmin(np.abs(cl - (cl[-1] - 12)))] - tips[k]; back /= max(np.linalg.norm(back), 1e-9)
-                v = free[np.argmax(free @ back)]
-                leg[-1] = tips[k] + v * min(10.0, 0.5 * cl[-1])
-            ctrl += leg
-            n_free.append(nf)
-        x0 = np.concatenate([x0, np.array(ctrl).ravel()])
-        T = np.array(tips)
-        x = x0
+    def _optimise(self, names, tips, E, nrm, routes, init=None):
+        """Robot shape (straight + arc 1 + arc 2) close to the coarse route E -> targets, then optimised.
+        The shape is built backwards from the last target, so the tip is exactly on it.
+        init = (frame, x0): start from this shape instead of fitting one to the route (see _arc_inits)."""
+        T = np.asarray(tips[-1], float); Tall = np.array(tips, float)
+        (L1max, k1max), (L2max, k2max) = robot_model.arc_limits(self.robot)
+        if init is not None:
+            frame, x0 = init
+            return self._refine(names, T, Tall, frame, np.asarray(x0, float))
+        route = np.vstack([np.asarray(rt, float) for rt in routes])        # entry ... last target
+        back = route[::-1]
+        cl = np.r_[0, np.cumsum(np.linalg.norm(np.diff(back, axis=0), axis=1))]
+        aim = back[min(np.searchsorted(cl, 10.0), len(back) - 1)] - T      # route direction ~10 mm before the tip
+        if np.linalg.norm(aim) < 1e-6: aim = E - T
+        d0 = aim / np.linalg.norm(aim); e1 = robot_model._perp(d0); e2 = np.cross(d0, e1)
+        frame = (d0, e1, e2)
+        bounds = [(-1.5, 1.5), (-1.5, 1.5), (0, L2max), (0, k2max), (-7, 7), (0, L1max), (0, k1max), (-7, 7)]
         calls = [0]
-        def fun(x, w):
+        def stop_check():
             calls[0] += 1
             if calls[0] % 200 == 0: self._check_stop()               # lets the Stop button interrupt an optimisation
-            return self._evaluate(x, E, frame, tips, n_free, T, w=w)
-        try:                                                        # penalty continuation: soft first, then strict
+        # 1. fit the shape to the coarse route (mean squared distance of the route to the robot)
+        rpts = route[np.linalg.norm(route - E, axis=1) > 1.0]
+        def fit(x):
+            stop_check()
+            sh = self._shape(x, T, frame)
+            if sh is None: return 1e6
+            d = cKDTree(sh["points"]).query(rpts)[0]
+            return float(np.mean(d ** 2)) + 0.01 * np.sum((sh["entry"] - E) ** 2)
+        best_x, best_f = None, np.inf
+        for x0 in ([0, 0, 15, 0, 0, 15, 0, 0], [0, 0, 20, 0.5 * k2max, 0, 20, 0.5 * k1max, 0],
+                   [0, 0, 20, 0.5 * k2max, np.pi, 20, 0.5 * k1max, np.pi]):
+            try:
+                o = minimize(fit, np.array(x0, float), method="Powell", bounds=bounds,
+                             options=dict(maxfev=600, xtol=1e-2, ftol=1e-3))
+            except Cancelled: raise
+            if o.fun < best_f: best_x, best_f = o.x, o.fun
+        return self._refine(names, T, Tall, frame, best_x)
+
+    def _bounds_via(self):
+        (L1max, k1max), _ = robot_model.arc_limits(self.robot)
+        return [(-1.5, 1.5), (-1.5, 1.5), (0, L1max), (0, k1max), (-7, 7)]
+
+    def _optimise_via(self, names, tips, E, route):
+        """Several targets, the second-to-last one (P) exactly where arc 1 meets arc 2: arc 2 runs from P to the
+        tip, arc 1 and the straight part are fitted to the coarse route skin -> P, then everything is optimised.
+        Unlike _arc_inits the robot may already be curved when it passes P."""
+        T, P = np.asarray(tips[-1], float), np.asarray(tips[-2], float); Tall = np.array(tips, float)
+        d0 = (P - T) / np.linalg.norm(P - T); e1 = robot_model._perp(d0); frame = (d0, e1, np.cross(d0, e1))
+        (L1max, k1max), _ = robot_model.arc_limits(self.robot)
+        rpts = np.asarray(route, float); rpts = rpts[np.linalg.norm(rpts - E, axis=1) > 1.0]
+        calls = [0]
+        def fit(x):
+            calls[0] += 1
+            if calls[0] % 200 == 0: self._check_stop()
+            sh = self._shape(x, T, frame, via=P)
+            if sh is None: return 1e6
+            dd = cKDTree(sh["points"]).query(rpts)[0]
+            return float(np.mean(dd ** 2)) + 0.01 * np.sum((sh["entry"] - E) ** 2) + 100.0 * sh["over"] ** 2
+        best_x, best_f = None, np.inf
+        for x0 in ([0, 0, 15, 0, 0], [0, 0, 25, 0.5 * k1max, 0], [0, 0, 25, 0.5 * k1max, np.pi]):
+            o = minimize(fit, np.array(x0, float), method="Powell", bounds=self._bounds_via(),
+                         options=dict(maxfev=600, xtol=1e-2, ftol=1e-3))
+            if o.fun < best_f: best_x, best_f = o.x, o.fun
+        return self._refine(names, T, Tall, frame, best_x, via=P)
+
+    def _bounds(self):
+        (L1max, k1max), (L2max, k2max) = robot_model.arc_limits(self.robot)
+        return [(-1.5, 1.5), (-1.5, 1.5), (0, L2max), (0, k2max), (-7, 7), (0, L1max), (0, k1max), (-7, 7)]
+
+    def _refine(self, names, T, Tall, frame, x, via=None):
+        """Penalty continuation: soft first, then strict (Powell, derivative-free: the skin entry moves in jumps)."""
+        bounds = self._bounds() if via is None else self._bounds_via()
+        calls = [0]
+        def stop_check():
+            calls[0] += 1
+            if calls[0] % 200 == 0: self._check_stop()
+        def fun(x, w):
+            stop_check()
+            return self._evaluate(x, T, frame, Tall, w=w, via=via)
+        d = None
+        try:
             for w in (0.2, 1.0, 5.0, 25.0):
-                opt = minimize(fun, x, args=(w,), method="L-BFGS-B",
-                               options=dict(maxiter=self.pl["optimizer_iterations"], eps=1e-3))
+                opt = minimize(fun, x, args=(w,), method="Powell", bounds=bounds,
+                               options=dict(maxfev=self.pl["optimizer_iterations"] * 8, xtol=1e-2, ftol=1e-4))
                 x = opt.x
-                d = self._evaluate(x, E, frame, tips, n_free, T, detail=True)
+                d = self._evaluate(x, T, frame, Tall, detail=True, via=via)
                 if d is None: return None
-                if w >= 1.0 and not self._result(names, E, d).problems: break
-                # the line search could not move at all with this penalty weight: a heavier one starts from the
-                # same point and gets stuck the same way (measured on IXI057), so stop here and save the time
-                if w >= 1.0 and opt.nit == 0: break
+                if w >= 1.0 and not self._result(names, d).problems: break
         except Cancelled:
             raise
         except Exception as ex:
             self.log(f"    optimisation failed: {ex}"); return None
-        return self._result(names, E, d)
+        return self._result(names, d)
 
-    def _result(self, names, E, d):
+    def _result(self, names, d):
         rb, problems = self.robot, []
+        L0, L1, L2 = d["L"]; k1, k2 = d["k"]
         if d["min_c"] < -0.1: problems.append(f"enters a no-go zone ({-d['min_c']:.1f} mm too close)")
-        if d["kappa_max"] > 1.03 / rb["min_bend_radius_mm"]:
-            problems.append(f"bends too tightly (radius {1 / d['kappa_max']:.0f} mm)")
+        if d["entry_dist"] > 1.5 * self.pl["search_grid_mm"] + 0.5: problems.append("entry outside the allowed skin zone")
         if d["angle"] > rb["max_entry_angle_deg"] + 0.5: problems.append(f"entry angle {d['angle']:.0f} deg")
         if d["length"] > rb["max_length_mm"] + 0.5: problems.append(f"too long ({d['length']:.0f} mm)")
-        if d["turn"] > rb["max_total_turn_deg"] + 1: problems.append(f"turns {d['turn']:.0f} deg in total")
+        if L0 < robot_model.min_straight(rb) - 0.5: problems.append(f"straight part only {L0:.0f} mm")
+        (L1max, k1max), (L2max, k2max) = robot_model.arc_limits(rb)
+        if k2 > k2max * 1.03 or L2 > L2max + 0.5: problems.append(f"arc 2 out of range ({L2:.0f} mm, R {1 / max(k2, 1e-9):.0f} mm)")
+        for n, m in zip(names[:-1], d["miss"]):
+            if m > self.pl.get("target_pass_mm", 1.0): problems.append(f"misses {n} by {m:.1f} mm")
         pts = d["points"]
         clear = {}
         r = rb["diameter_mm"] / 2
         for zname, fld in self.p.zone_dist.items():
             if zname in self.cfg.get("no_go", {}) and "outside_of" in self.cfg["no_go"][zname]: continue
             clear[zname] = round(float(fld(pts).min() - r), 1)
-        return PathResult(list(names), E, pts, not problems, float(d["cost"]), float(d["length"]),
-                          float(1 / max(d["kappa_max"], 1e-9)), float(d["angle"]), float(d["turn"]), clear, problems)
+        used = [(L, k) for L, k in ((L1, k1), (L2, k2)) if L > 0.5 and k > 1e-5]
+        rmin = min((1 / k for _, k in used), default=1e9)
+        shape = {"straight_mm": round(float(L0), 1),
+                 "arc1_mm": round(float(L1), 1), "arc1_radius_mm": round(float(1 / max(k1, 1e-9)), 1) if k1 > 1e-5 else None,
+                 "arc1_plane_deg": round(float(np.degrees(d["phi"][0])) % 360, 1),
+                 "arc2_mm": round(float(L2), 1), "arc2_radius_mm": round(float(1 / max(k2, 1e-9)), 1) if k2 > 1e-5 else None,
+                 "arc2_plane_deg": round(float(np.degrees(d["phi"][1])) % 360, 1)}
+        turn = float(np.degrees(k1 * L1 + k2 * L2))
+        return PathResult(list(names), d["entry"], pts, not problems, float(d["cost"]), float(d["length"]),
+                          float(rmin), float(d["angle"]), turn, clear, problems, d["labels"], shape)
 
     # ------------------------------------------------------------------ target checks
     def check_target(self, tip):
@@ -548,7 +673,7 @@ class Planner:
 
     def _log_result(self, seq, res):
         self.log(f"  {' -> '.join(seq)}: {'OK' if res.feasible else 'rejected: ' + '; '.join(res.problems)}"
-                 f" (length {res.length_mm:.0f} mm, min radius {res.min_radius_mm:.0f} mm)")
+                 f" (length {res.length_mm:.0f} mm: {robot_model.shape_text(res.shape)})")
 
     @staticmethod
     def _feasible_sets(cands):

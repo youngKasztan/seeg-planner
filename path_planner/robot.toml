@@ -4,13 +4,16 @@
 # Distances in millimetres, angles in degrees.
 # ---------------------------------------------------------------------------------------------
 
-[robot]
+[robot]                       # concentric-tube robot: straight part, then two pre-curved tubes (see robot_model.py)
 diameter_mm         = 2.0     # outer diameter of the robot body (its radius is added to every safety margin)
-min_bend_radius_mm  = 40.0    # tightest curve the robot can follow; large = wide, sweeping curves
-max_length_mm       = 150.0   # longest inserted length, skin to final target
-straight_entry_mm   = 15.0    # first part is straight (through skin and bone, after drilling)
+max_length_mm       = 150.0   # longest inserted length, skin to the tip (straight + arc 1 + arc 2)
+min_straight_mm     = 15.0    # the straight part is pushed out first, any length but at least this (skin and bone)
 max_entry_angle_deg = 30.0    # angle between the robot and the skin normal at the entry point
-max_total_turn_deg  = 150.0   # total change of direction along one path
+arc1_max_length_mm  = 35.0    # arc 1 (comes out of the straight part): longest extension
+arc1_min_radius_mm  = 50.0    #   ... tightest bend (outer, thicker tube)
+arc2_max_length_mm  = 35.0    # arc 2 (comes out of arc 1, carries the tip): longest extension
+arc2_min_radius_mm  = 30.0    #   ... tightest bend (inner, thinner tube: can bend more without overstraining)
+                              # wider arcs are preferred: planning.curvature_weight
 
 [electrode]                   # SEEG electrode carried by the robot: recording contacts, not one continuous conductor
 contact_spacing_mm = 5.0      # centre-to-centre distance between neighbouring contacts, along the path
@@ -24,16 +27,17 @@ on_target_mm       = 1.5      # a target counts as recorded when a contact centr
 search_grid_mm        = 2.0   # resolution of the coarse route search
 sample_step_mm        = 1.0   # how densely a path is checked
 target_tolerance_mm   = 3.0   # zones marked ignore_near_targets are not checked this close to a target
-insertion_cost_mm     = 40.0  # one extra insertion "costs" as much as this much path length;
+target_pass_mm        = 1.0   # a path through several targets must pass this close to the earlier ones
+insertion_cost_mm     = 150.0 # one extra insertion "costs" as much as this much path length;
                               # higher = the planner tries harder to reach several targets with one path
 max_targets_per_path  = 3
 group_max_distance_mm = 60.0  # targets further apart than this are never put on one path
 min_path_distance_mm  = 2.0   # paths used together must keep this gap between the robot bodies
 min_entry_distance_mm = 10.0  # ... and their skin entry points must be at least this far apart
-time_limit_s          = 120   # after this, no more groups of targets are tried (every target alone is always planned)
+time_limit_s          = 240   # after this, no more groups of targets are tried (every target alone is always planned)
 entry_candidates      = 3     # entry points tried per path
-optimizer_iterations  = 150
-curvature_weight      = 0.5   # higher = straighter, more sweeping paths (cost of bending)
+optimizer_iterations  = 150   # x 8 = shape evaluations per optimisation step
+curvature_weight      = 0.1   # cost of bending; only tight arcs cost much (prefers wide arcs, does not forbid curving)
 
 [entry_zone]                  # uses the landmarks in headset/headset_manifest.json
 exclude_face               = true
@@ -88,6 +92,21 @@ mask = ["extras/sss_prior.nii.gz"]
 margin_mm = 3.0
 ignore_near_targets = false
 
+[no_go.veins_prior]            # veins from the VENAT atlas (PRIOR: not measured in this patient, no venography)
+mask = ["priors/veins_prior.nii.gz"]
+margin_mm = 1.0
+ignore_near_targets = false
+
+[no_go.corticospinal_tract]    # main motor pathway (DTI tractography)
+mask = ["tracts/cst_L.nii.gz", "tracts/cst_R.nii.gz"]
+margin_mm = 1.0
+ignore_near_targets = false
+
+[no_go.optic_radiation]        # visual pathway incl. Meyer's loop (DTI tractography)
+mask = ["tracts/optic_rad_L.nii.gz", "tracts/optic_rad_R.nii.gz"]
+margin_mm = 1.0
+ignore_near_targets = false
+
 [no_go.outside_brain]          # after the straight entry the robot must stay inside the brain
 outside_of = "mask.nii.gz"
 margin_mm = 1.0
@@ -97,11 +116,6 @@ ignore_near_targets = true
 # SOFT zones: allowed, but the planner prefers to stay away.
 #   cost per mm of path = weight * exp(-distance / scale_mm)
 # ---------------------------------------------------------------------------------------------
-[avoid.veins_prior]
-mask = ["priors/veins_prior.nii.gz"]
-weight = 3.0
-scale_mm = 3.0
-
 [avoid.deep_grey_nuclei]       # thalamus, caudate, putamen, pallidum, accumbens: allowed (may be targets), not preferred
 labels = [10, 11, 12, 13, 26, 49, 50, 51, 52, 58]
 weight = 1.0
@@ -114,16 +128,6 @@ scale_mm = 1.5
 
 [avoid.eloquent_cortex]        # motor, sensory, visual, auditory, language (left)
 labels = [1024, 2024, 1022, 2022, 1021, 2021, 1034, 2034, 1018, 1020, 1030, 1031]
-weight = 2.0
-scale_mm = 3.0
-
-[avoid.corticospinal_tract]
-mask = ["tracts/cst_L.nii.gz", "tracts/cst_R.nii.gz"]
-weight = 3.0
-scale_mm = 3.0
-
-[avoid.optic_radiation]
-mask = ["tracts/optic_rad_L.nii.gz", "tracts/optic_rad_R.nii.gz"]
 weight = 2.0
 scale_mm = 3.0
 

@@ -5,6 +5,7 @@ Continuum-robot path planner on a synthetic head (no patient data needed):  pyth
   3. a target inside a no-go zone is reported, not planned
   ... 8. electrode contacts every 5 mm from the tip; a target 20 mm above the tip lies on contact 5
   9. target region from two outlines (axial square + coronal square = a cube); the planner puts the tip inside it
+ 10. two targets that are NOT on one straight line: one path, straight through the first, then bending onto the second
 """
 import os, sys, tempfile
 import numpy as np, nibabel as nib
@@ -38,9 +39,22 @@ with tempfile.TemporaryDirectory() as d:
 
     r = pl.plan_sequence(["T"], [np.array([0.0, 10.0, 0.0])])         # artery 15 mm straight above the target
     art = r.min_clearance_mm["arteries"]
+    sh = r.shape
     print(f"1. feasible {r.feasible}, artery clearance {art} mm (needs >= {cfg['no_go']['arteries']['margin_mm']}), "
-          f"min bend radius {r.min_radius_mm:.0f} mm (needs >= {rb['min_bend_radius_mm']}), length {r.length_mm:.0f} mm")
-    assert r.feasible and art >= cfg["no_go"]["arteries"]["margin_mm"] - 0.1 and r.min_radius_mm >= rb["min_bend_radius_mm"] * 0.97
+          f"shape {sh}, length {r.length_mm:.0f} mm, tip error {np.linalg.norm(r.points[-1] - [0, 10, 0]):.3f} mm")
+    assert r.feasible and art >= cfg["no_go"]["arteries"]["margin_mm"] - 0.1
+    assert np.linalg.norm(r.points[-1] - [0, 10, 0]) < 1e-6 and sh["straight_mm"] >= rb["min_straight_mm"] - 0.5
+    assert sh["arc1_mm"] <= rb["arc1_max_length_mm"] + 1e-6 and sh["arc2_mm"] <= rb["arc2_max_length_mm"] + 1e-6
+    assert (sh["arc1_radius_mm"] or 1e9) >= rb["arc1_min_radius_mm"] - 1e-6 and (sh["arc2_radius_mm"] or 1e9) >= rb["arc2_min_radius_mm"] - 1e-6
+    assert set(np.unique(r.labels)) <= {0, 1, 2} and len(r.labels) == len(r.points) and (np.diff(r.labels) >= 0).all()
+    # the shape is really straight + circular arcs: the curvature is constant on each arc
+    import robot_model
+    p2, p1, vb = robot_model.backward([0, 0, 0.0], np.array([0, 0, 1.0]), 30, 1 / 30, 0.3, 20, 1 / 60, 1.0)
+    for P, R in ((p2, 30), (p1, 60)):                                 # points of a full-circle fit lie on radius R
+        a3, b3, c3 = P[0], P[len(P) // 2], P[-1]
+        ab, ac = b3 - a3, c3 - a3; n = np.cross(ab, ac)
+        cc = a3 + ((ac @ ac) * np.cross(n, ab) + (ab @ ab) * np.cross(ac, n)) / (2 * (n @ n))   # circumcentre
+        assert np.allclose(np.linalg.norm(P - cc, axis=1), R, atol=1e-6)
 
     chosen, unc, _ = pl.plan_all({"A": [-20.0, -15.0, 0.0], "B": [-20.0, -15.0, -20.0]})
     print(f"2. targets A (upper) and B (lower) -> {len(chosen)} path(s): {[c.targets for c in chosen]}")
@@ -99,7 +113,7 @@ with tempfile.TemporaryDirectory() as d:
     print(f"8. {len(c.centres)} contacts, spacing {gaps.min():.2f}-{gaps.max():.2f} mm, on targets {c.on_target}")
     assert np.allclose(gaps, cfg["electrode"]["contact_spacing_mm"], atol=0.05)
     assert c.on_target["V"][0] == 1 and c.on_target["V"][1] < 0.05 and c.on_target["U"][0] == 5 and c.on_target["U"][1] < 0.05
-    assert c.on_target["off"][1] > 2.4 and c.centres[:, 2].max() <= 40 - cfg["robot"]["straight_entry_mm"] + 1e-6
+    assert c.on_target["off"][1] > 2.4 and c.centres[:, 2].max() <= 40 - cfg["robot"]["min_straight_mm"] + 1e-6
 
     # 9. target region: outline 10x10 voxels in the axial view and 10x6 in the coronal view -> a 10 x 10 x 6 box
     reg = regions.Region("R1", regions.COLOURS[0])
@@ -118,4 +132,12 @@ with tempfile.TemporaryDirectory() as d:
     ti = np.round(pt.mm_to_vox(tip)).astype(int)
     print(f"   region tip {np.round(tip, 1)} ({msg})")
     assert tip is not None and m[tuple(ti)]
+
+    # 10. curved path through two targets (exact arc start from _arc_inits): straight through A, then bend onto B
+    A10, B10 = np.array([-20.0, -15.0, 0.0]), np.array([-26.0, -15.0, -25.0])
+    r10 = pl.plan_sequence(["A", "B"], [A10, B10], first_feasible=True)
+    miss = np.linalg.norm(r10.points - A10, axis=1).min()
+    print(f"10. curved two-target path: feasible {r10.feasible}, passes A within {miss:.2f} mm, shape {r10.shape}")
+    assert r10.feasible and miss <= cfg["planning"]["target_pass_mm"] and np.linalg.norm(r10.points[-1] - B10) < 1e-6
+    assert (r10.shape["arc1_mm"] + r10.shape["arc2_mm"]) > 5 and min(r10.shape["arc1_radius_mm"] or 1e9, r10.shape["arc2_radius_mm"] or 1e9) < 1e3
 print("OK")

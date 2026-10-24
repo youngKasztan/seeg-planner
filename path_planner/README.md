@@ -47,8 +47,15 @@ The headset only displays the result (brain + paths); all planning happens here.
    Copy the headset folder to the glasses as before.
 
 ## Robot constraints and no-go zones: `robot.toml`
-All limits are in `robot.toml` (next to the exe after building): robot diameter, minimum bend radius,
-maximum length, straight entry length, entry angle, total turning; no-go zones (hard, with safety margins)
+The robot model (`robot_model.py`) is a concentric-tube robot: it is pushed in **straight** first (any length,
+at least `min_straight_mm` for skin and bone), then **arc 1** (pre-curved tube, at most 35 mm, radius >=
+`arc1_min_radius_mm`) and **arc 2** (thinner inner tube carrying the tip, at most 35 mm, radius >=
+`arc2_min_radius_mm`). Each tube can be rotated, so each arc bends in its own plane. The inner tube is thinner and
+can be bent more tightly without overstraining it, so by default arc 2 allows the tighter bend (30 mm vs 50 mm);
+put the real values of the robot here. Wider arcs are preferred (`curvature_weight`). On the slices, in 3D and in
+the headset the parts have their own colours: cyan = straight, yellow = arc 1, orange = arc 2; the path list shows
+e.g. `straight 31 | arc 1 24 mm R 131 | arc 2 5 mm R 79`.
+Other limits: robot diameter, maximum length, entry angle; no-go zones (hard, with safety margins)
 and soft zones (preferred distance). Edit, save, press **Reload robot.toml**. No code changes needed.
 
 | No-go zone (hard) | Source | Margin |
@@ -60,10 +67,13 @@ and soft zones (preferred distance). Edit, save, press **Reload robot.toml**. No
 | hypothalamus (ventral diencephalon), optic chiasm | T1 segmentation | 2 mm |
 | brainstem, cerebellum | T1 segmentation | 3 mm, 1 mm |
 | superior sagittal sinus | PRIOR from anatomical rules (no venography) | 3 mm |
+| veins | PRIOR from the VENAT vein atlas (no venography) | 1 mm |
+| corticospinal tract | DTI tractography | 1 mm |
+| optic radiation (incl. Meyer's loop) | DTI tractography | 1 mm |
 | outside the brain (after the straight entry) | brain mask | 1 mm |
 
-Soft zones (allowed, the planner keeps away): veins (VENAT atlas PRIOR), deep grey nuclei (may be targets),
-sulci, eloquent cortex (DKT atlas), corticospinal tract, optic radiation, other tracts (DTI).
+Soft zones (allowed, the planner keeps away): deep grey nuclei (may be targets), sulci, eloquent cortex
+(DKT atlas), other tracts (arcuate, uncinate, IFOF; DTI).
 
 ## Electrode contacts
 The robot carries an SEEG electrode whose recording contacts are not continuous: there is one contact every
@@ -80,16 +90,24 @@ shows them too.
 ## How a path is found
 1. Coarse route on a 2 mm grid (minimum-cost path, `skimage.graph.MCP`): impassable in no-go zones,
    expensive near them and in soft zones.
-2. The robot path = straight entry (through skin and bone) + cubic spline through the targets.
-   The spline is optimised (`scipy` L-BFGS) for: no-go clearance (hard), bend radius >= minimum (hard),
-   entry angle, total turning and length limits (hard), then short + sweeping + far from soft zones.
-   Several starting guesses (coarse routes from different entries, straight lines) are tried.
+2. The robot shape (straight + arc 1 + arc 2) is fitted to the coarse route and then optimised (`scipy` Powell,
+   penalty continuation). It is built backwards from the target - tip direction, arc 2, arc 1, then straight
+   back until it leaves the head - so the tip is exactly on the target and the skin entry follows from the shape.
+   Hard: no-go clearance, arcs inside the brain, entry on the allowed skin zone, entry angle, straight part long
+   enough, total length, earlier targets of a multi-target path within `target_pass_mm`. Cost: length + soft
+   zones + bending (prefers wide arcs). Several starting routes (from different entries, straight lines) are tried.
 3. Every result is checked against all hard limits; only paths that pass are used.
 4. An integer program (`scipy.milp`) picks the set of paths that covers all targets with the lowest
    `path cost + insertion_cost_mm` per insertion. Paths used together must not collide: their robot bodies
    keep `min_path_distance_mm` apart and their skin entries `min_entry_distance_mm` apart. For every target
    up to 3 feasible paths from different entries are kept, so a clash is solved by taking another entry;
    a target that still cannot get a non-colliding path is reported in the log.
+   Several targets on one path are strongly preferred (`insertion_cost_mm` = 150: an extra insertion costs as
+   much as 150 mm of path). For a group the planner starts from exact shapes: (a) straight through the earlier
+   targets, then one arc onto the last one; (b) the second-to-last target exactly where arc 1 meets arc 2, so the
+   robot may already be curved when it passes it. A group is still rejected when no such shape keeps clear of the
+   no-go zones (e.g. superior temporal gyrus -> insula crosses the middle cerebral artery branches in the Sylvian
+   fissure).
 
 ## Build the Windows exe
 Double click `build_exe.bat` (Python 3.11 must be installed). Result: `dist\ContinuumPathPlanner\ContinuumPathPlanner.exe`.

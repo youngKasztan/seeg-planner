@@ -150,6 +150,9 @@ namespace SeegPlanner
         {
             for (var p = t; p != null && p != PatientRoot; p = p.parent)
             {
+                if (p.name.EndsWith("_straight")) return new Color(0.2f, 0.8f, 1f, 1f);         // robot: straight part (cyan)
+                if (p.name.EndsWith("_arc1")) return new Color(1f, 0.85f, 0f, 1f);              // arc 1 (yellow)
+                if (p.name.EndsWith("_arc2")) return new Color(1f, 0.45f, 0f, 1f);              // arc 2 (orange)
                 if (p.name.EndsWith("_contacts_on_target")) return new Color(0.2f, 1f, 0.2f, 1f);   // electrode contact on a target
                 if (p.name.EndsWith("_contacts")) return new Color(0.85f, 0.85f, 0.9f, 1f);         // other electrode contacts
                 if (colours.TryGetValue(p.name, out var c)) return c;

@@ -6,8 +6,11 @@
 //   Right B       : start again - clear all touched points, hologram back in front of you
 //   Right A       : hologram on / off (to look at the real head)
 //   Left X        : skin (scalp) layer on / off, to check the fit
-//   Left grip     : hold to carry the hologram with the left controller (manual placement)
+//   Left grip     : hold to carry the hologram with the left controller (manual placement);
+//                   when the hologram follows the head QR codes, releasing the grip re-anchors it there
 //
+// Head tracking: HeadMarkerTracker.cs (added automatically). After >= 3 landmarks the hologram is anchored to the
+// SEEG-HEAD QR codes visible at that moment and follows the head when the person moves.
 // The help panel floats above the left controller (in front of you when the left controller is not tracked).
 // It is a world-space uGUI canvas: UI/Default and the built-in font are always in a player build
 // (TextMesh's font shader is not, so the old help text was invisible on the headset).
@@ -30,6 +33,7 @@ namespace SeegPlanner
         [Tooltip("Width of the help panel in metres")]
         public float panelWidth = 0.24f;
 
+        HeadMarkerTracker tracker;
         Transform tip, panel;
         Text text;
         bool placed, hologramOn = true, scalpOn, scalpDefault;
@@ -42,6 +46,9 @@ namespace SeegPlanner
 
         void Start()
         {
+            tracker = GetComponent<HeadMarkerTracker>();
+            if (tracker == null) tracker = gameObject.AddComponent<HeadMarkerTracker>();
+            tracker.loader = loader;
             tip = MakeSphere("QuestPenTip", 0.008f, Color.red);
             panel = MakePanel();
             tip.gameObject.SetActive(false); panel.gameObject.SetActive(false);
@@ -101,6 +108,7 @@ namespace SeegPlanner
         void StartOver(Transform cam)
         {
             registration.ResetCapture();
+            tracker.StopFollowing();
             hologramOn = true; loader.PatientRoot.gameObject.SetActive(true);
             scalpOn = scalpDefault; loader.SetLayerVisible("scalp", scalpOn);
             PlaceInFront(cam);
@@ -112,9 +120,13 @@ namespace SeegPlanner
             string n = registration.NextLandmark;
             if (n == null) { status = "All points done. Press B to start again."; return; }
             registration.CaptureWorld(tip.position);
-            status = registration.CapturedCount >= 3
-                ? $"Recorded: {Nice(n)}. Fit error (FRE) {registration.LastFreMm:F1} mm"
-                : $"Recorded: {Nice(n)} ({registration.CapturedCount} of at least 3)";
+            if (registration.CapturedCount >= 3)
+            {
+                bool anchored = tracker.Calibrate();      // registration moved PatientRoot: anchor it to the head codes
+                status = $"Recorded: {Nice(n)}. Fit error (FRE) {registration.LastFreMm:F1} mm\n" +
+                         (anchored ? "Anchored to the head QR code(s)." : "No head QR code visible - the hologram will NOT follow the head.");
+            }
+            else status = $"Recorded: {Nice(n)} ({registration.CapturedCount} of at least 3)";
         }
 
         string Message()
@@ -123,7 +135,7 @@ namespace SeegPlanner
             string task = n == null
                 ? "<b>All points done.</b>\nCheck the fit: X = skin on/off, A = hologram on/off."
                 : $"<b>Touch: {Nice(n).ToUpper()}</b>\n{Hint(n)}\n(patient's own left / right)\nRight trigger = record    Y (or left stick click) = skip";
-            return $"{task}\n\n<i>{status}</i>\n\n" +
+            return $"{task}\n\n<i>{status}</i>\n\n{tracker.StatusLine()}\n\n" +
                    "A = hologram on/off    X = skin on/off\nB = START AGAIN    Left grip = move the brain\n" +
                    $"<size=18>last button: {lastButton}</size>";
         }
@@ -161,6 +173,10 @@ namespace SeegPlanner
                 root.SetParent(null, true);
             }
             if (grip) { root.rotation = r * grabRot; root.position = p + r * grabPos; }
+            tracker.Paused = grip;
+            if (!grip && prevGrip && tracker.Following)          // manual correction: re-anchor to the head codes
+                status = tracker.Calibrate() ? "Moved by hand and re-anchored to the QR code(s)."
+                                             : "Moved by hand - no QR code visible, the old anchoring is kept.";
             prevGrip = grip;
         }
 
@@ -198,7 +214,7 @@ namespace SeegPlanner
             canvas.renderMode = RenderMode.WorldSpace;
             canvas.sortingOrder = 100;
             var rt = go.GetComponent<RectTransform>();
-            rt.sizeDelta = new Vector2(PanelPx, 330f);
+            rt.sizeDelta = new Vector2(PanelPx, 420f);
             rt.pivot = new Vector2(0.5f, 0f);
             go.transform.localScale = Vector3.one * (panelWidth / PanelPx);
 

@@ -40,7 +40,7 @@ def contacts(points, cfg, targets=None):
     e = settings(cfg)
     P = np.asarray(points, float)
     s = _arclength(P); L = s[-1]
-    skip = float(cfg.get("robot", {}).get("straight_entry_mm", 0.0))
+    skip = float(cfg.get("robot", {}).get("min_straight_mm", cfg.get("robot", {}).get("straight_entry_mm", 0.0)))
     d = e["first_contact_mm"] + e["contact_spacing_mm"] * np.arange(int(L / max(e["contact_spacing_mm"], 0.1)) + 2)
     d = d[d <= max(L - skip, 0.0)]
     if int(e["n_contacts"]) > 0: d = d[:int(e["n_contacts"])]

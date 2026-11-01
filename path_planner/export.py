@@ -2,7 +2,8 @@
 export.py - write the planned paths for the headset app.
 
   <headset>/plan.json   targets and paths (RAS mm and headset scene metres), robot settings, checks
-  <headset>/paths.glb   tubes along the paths (robot diameter) + target spheres, in the same coordinates as
+  <headset>/paths.glb   tubes along the paths (robot diameter; nodes path_<n>_straight / _arc1 / _arc2 in the
+                        app's colours) + target spheres, in the same coordinates as
                         patient_scene.glb, so the headset shows them inside the brain (PatientLoader loads it);
                         electrode contacts as bands on the tubes: node path_<n>_contacts (silver) and
                         path_<n>_contacts_on_target (green = a contact lying on a target)
@@ -11,7 +12,8 @@ import json, os
 import numpy as np
 import trimesh
 
-import electrode
+import electrode, robot_model
+SEGMENT_NODES = {0: "straight", 1: "arc1", 2: "arc2"}
 
 R = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], float)          # RAS -> glTF (Y up), as in tools/export_headset.py
 COLOURS = [(0.1, 0.8, 1.0), (1.0, 0.55, 0.1), (0.7, 0.3, 1.0), (0.2, 1.0, 0.4), (1.0, 0.3, 0.6)]
@@ -63,10 +65,17 @@ def export(headset_dir, paths, targets, cfg, centre, uncovered=(), target_proble
         scene.add_geometry(s, node_name=f"target_{name}", geom_name=f"target_{name}")
     for i, r in enumerate(paths):
         col = COLOURS[i % len(COLOURS)]
-        m = tube(to_scene(r.points, centre), rad / 1000)
-        m.visual = trimesh.visual.TextureVisuals(material=trimesh.visual.material.PBRMaterial(
-            name=f"path_{i + 1}", baseColorFactor=[*col, 1.0], metallicFactor=0.1, roughnessFactor=0.4))
-        scene.add_geometry(m, node_name=f"path_{i + 1}", geom_name=f"path_{i + 1}")
+        lab = r.labels if r.labels is not None else np.zeros(len(r.points), int)
+        for seg, seg_name in SEGMENT_NODES.items():                   # one tube per part, in the app's colours
+            idx = np.where(lab == seg)[0]
+            if not len(idx): continue
+            if idx[0] > 0: idx = np.r_[idx[0] - 1, idx]                # joined to the previous part
+            if len(idx) < 2: continue
+            m = tube(to_scene(r.points[idx], centre), rad / 1000)
+            node = f"path_{i + 1}_{seg_name}"
+            m.visual = trimesh.visual.TextureVisuals(material=trimesh.visual.material.PBRMaterial(
+                name=node, baseColorFactor=[*robot_model.SEGMENT_COLOURS[seg], 1.0], metallicFactor=0.1, roughnessFactor=0.4))
+            scene.add_geometry(m, node_name=node, geom_name=node)
         c = electrode.for_path(r, cfg, targets); es = electrode.settings(cfg)
         for suffix, sel, rgba in (("contacts", [j for j in range(len(c.centres)) if j not in c.hits], [0.85, 0.85, 0.9, 1.0]),
                                   ("contacts_on_target", sorted(c.hits), [0.2, 1.0, 0.2, 1.0])):
@@ -77,10 +86,11 @@ def export(headset_dir, paths, targets, cfg, centre, uncovered=(), target_proble
                 name=f"path_{i + 1}_{suffix}", baseColorFactor=rgba, metallicFactor=0.3, roughnessFactor=0.4))
             scene.add_geometry(band, node_name=f"path_{i + 1}_{suffix}", geom_name=f"path_{i + 1}_{suffix}")
         out["paths"].append({
-            "id": f"path_{i + 1}", "targets": r.targets, "colour": col,
+            "id": f"path_{i + 1}", "targets": r.targets, "colour": col, "shape": r.shape,
+            "segment_of_point": [int(v) for v in lab], "segments": {"0": "straight", "1": "arc 1", "2": "arc 2"},
             "entry_ras_mm": np.round(r.entry, 2).tolist(), "entry_scene_m": sc(r.entry),
             "points_ras_mm": np.round(r.points, 2).tolist(), "points_scene_m": sc(r.points),
-            "length_mm": round(r.length_mm, 1), "min_bend_radius_mm": round(r.min_radius_mm, 1),
+            "length_mm": round(r.length_mm, 1), "min_bend_radius_mm": round(min(r.min_radius_mm, 1e6), 1),
             "entry_angle_deg": round(r.entry_angle_deg, 1), "total_turn_deg": round(r.total_turn_deg, 1),
             "min_clearance_mm": r.min_clearance_mm, "feasible": r.feasible, "problems": r.problems,
             "electrode": {"contact_spacing_mm": es["contact_spacing_mm"], "contact_length_mm": es["contact_length_mm"],

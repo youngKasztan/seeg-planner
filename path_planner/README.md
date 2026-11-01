@@ -13,6 +13,8 @@ The headset only displays the result (brain + paths); all planning happens here.
    **left click** adds a target on the current slice, **right click** moves the cursor. Targets can be on
    different slices. Double click a target to rename it. A target that is itself inside a no-go zone is shown
    in red; *Snap to safe point* moves it to the closest safe point (max 5 mm).
+   Targets are saved automatically to `targets.json` in the patient folder after every change (and regions to
+   `regions.json`), so they are back when the patient is opened again.
    **Layers** (right panel, tick to show on the slices and in 3D; the planner always uses every zone,
    ticked or not). One tick per group shows or hides the whole group; expand a group to tick single layers.
    All no-go zones are shown at start (except *outside_brain*, which would cover the whole head).

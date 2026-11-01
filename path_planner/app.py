@@ -17,7 +17,7 @@ sys.path.insert(0, HERE)
 import config, labels, layers
 from patient import Patient
 from planner import Planner, Cancelled
-import export, electrode, regions
+import export, electrode, regions, robot_model
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import matplotlib
@@ -141,10 +141,19 @@ class SliceView(QtWidgets.QWidget):
         if a.chk_paths.isChecked():
             for i, r in enumerate(a.paths):
                 ijk = p.mm_to_vox(r.points); pu, pv, d = self.uv(ijk); col = PATH_COLOURS[i % len(PATH_COLOURS)]
-                self.artists += self.ax.plot(pu, pv, color=col, lw=1, alpha=0.35)
+                lab = r.labels if r.labels is not None else np.zeros(len(pu), int)
                 near = np.abs(d - k) <= 2.0
-                if near.any():
-                    self.artists += self.ax.plot(np.where(near, pu, np.nan), np.where(near, pv, np.nan), color=col, lw=3)
+                for seg, scol in robot_model.SEGMENT_COLOURS.items():   # straight / arc 1 / arc 2 in their colours
+                    m = lab == seg
+                    if not m.any(): continue
+                    m = m | np.r_[m[1:], False]                     # join to the previous segment
+                    self.artists += self.ax.plot(np.where(m, pu, np.nan), np.where(m, pv, np.nan), color=scol, lw=1, alpha=0.35)
+                    mn = m & near
+                    if mn.any():
+                        self.artists += self.ax.plot(np.where(mn, pu, np.nan), np.where(mn, pv, np.nan), color=scol, lw=3)
+                if near.any():                                      # path number where it crosses this slice
+                    j = int(np.argmax(near))
+                    self.artists.append(self.ax.text(pu[j] + 3, pv[j] - 8, f"P{i + 1}", color=col, fontsize=8, weight="bold", zorder=6))
                 if a.chk_contacts.isChecked():                     # electrode contacts on this slice
                     c = electrode.for_path(r, a.cfg, a.plan_targets())
                     if len(c.centres):
@@ -152,7 +161,7 @@ class SliceView(QtWidgets.QWidget):
                         on = np.abs(cd - k) <= 2.0
                         hit = np.isin(np.arange(len(cu)), list(c.hits))
                         sets = ((~on & ~hit, dict(s=8, marker="o", facecolors="white", edgecolors="none", alpha=0.45, zorder=3)),
-                                (on & ~hit, dict(s=26, marker="s", facecolors=col, edgecolors="white", linewidths=0.8, zorder=4)),
+                                (on & ~hit, dict(s=18, marker="s", facecolors="white", edgecolors="black", linewidths=0.6, zorder=4)),
                                 (~on & hit, dict(s=40, marker="o", facecolors="none", edgecolors="#3f3", linewidths=1.0, alpha=0.6, zorder=6)),
                                 (on & hit, dict(s=90, marker="o", facecolors="none", edgecolors="#3f3", linewidths=2.0, zorder=7)))
                         for m, style in sets:                      # faint = contact on another slice, bold = on this slice
@@ -239,10 +248,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ltree = QtWidgets.QTreeWidget(); self.ltree.setHeaderHidden(True)
         self.ltree.itemChanged.connect(self._layer_toggled); sl.addWidget(self.ltree, 5)
         self.chk_paths = QtWidgets.QCheckBox("Show paths"); self.chk_paths.setChecked(True)
-        self.chk_paths.toggled.connect(self.redraw); sl.addWidget(self.chk_paths)
+        self.chk_paths.toggled.connect(self.redraw)
+        prow = QtWidgets.QHBoxLayout(); prow.addWidget(self.chk_paths)
+        hexc = lambda c: "#%02x%02x%02x" % tuple(int(255 * v) for v in c)
+        sc = robot_model.SEGMENT_COLOURS
+        prow.addWidget(QtWidgets.QLabel(f"<span style='color:{hexc(sc[0])}'>&#9632; straight</span>&nbsp; "
+                                        f"<span style='color:{hexc(sc[1])}'>&#9632; arc 1</span>&nbsp; "
+                                        f"<span style='color:{hexc(sc[2])}'>&#9632; arc 2</span>"))
+        prow.addStretch(1); sl.addLayout(prow)
         self.chk_contacts = QtWidgets.QCheckBox("Show electrode contacts"); self.chk_contacts.setChecked(True)
         self.chk_contacts.setToolTip("Recording contacts of the electrode ([electrode] in robot.toml, default every 5 mm).\n"
-                                     "Squares = contacts on this slice, faint dots = contacts on other slices,\n"
+                                     "White squares = contacts on this slice, faint dots = contacts on other slices,\n"
                                      "green ring = a contact that lies on a target.")
         self.chk_contacts.toggled.connect(self._contacts_toggled); sl.addWidget(self.chk_contacts)
         self.btn_plan = QtWidgets.QPushButton("Plan paths"); self.btn_plan.setStyleSheet("font-weight: bold; padding: 8px")
@@ -253,7 +269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row = QtWidgets.QHBoxLayout(); row.addWidget(self.btn_plan, 1); row.addWidget(self.btn_stop); sl.addLayout(row)
         self.bar = QtWidgets.QProgressBar(); self.bar.setRange(0, 1000); sl.addWidget(self.bar)
         sl.addWidget(QtWidgets.QLabel("<b>Paths</b>"))
-        self.rlist = QtWidgets.QTreeWidget(); self.rlist.setHeaderLabels(["Path", "Length", "Min radius", "Closest no-go", "Electrode contacts on targets"])
+        self.rlist = QtWidgets.QTreeWidget(); self.rlist.setHeaderLabels(["Path", "Length", "Shape (mm)", "Closest no-go", "Electrode contacts on targets"])
         self.rlist.setRootIsDecorated(False); sl.addWidget(self.rlist, 1)
         self.btn_export = QtWidgets.QPushButton("Export to headset"); self.btn_export.clicked.connect(self.export); sl.addWidget(self.btn_export)
         sl.addWidget(QtWidgets.QLabel("<b>Log</b>"))
@@ -309,6 +325,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.busy():                                          # never destroy a running thread
             self.worker.stop(); self.status.showMessage("stopping the planner before closing ...")
             self.worker.wait(30000)
+        self._autosave_targets(); self._save_regions()
         super().closeEvent(ev)
 
     # ------------------------------------------------------------------ patient
@@ -334,6 +351,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in p.warnings: self._log("WARNING: " + w)
         self._log(f"Patient loaded: {os.path.basename(p.folder.rstrip('/'))}; no-go zones: {', '.join(p.zone_masks)}")
         self.bar.setValue(1000); self.status.showMessage("Left click on a slice to add a target")
+        if getattr(self, "_targets_folder", None) != p.folder:     # another patient: start from its own targets
+            self.targets, self.paths, self.region_tips = {}, [], {}
+            self._refresh_targets(save=False); self._refresh_paths()
+        self._targets_folder = p.folder
         tf = os.path.join(p.folder, "targets.json")
         if os.path.exists(tf): self.load_targets(tf)
         self._load_regions()
@@ -437,7 +458,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if bad: warn = "  !! too close to " + ", ".join(f"{z} ({d} mm)" for z, d in bad)
         return f"{name}: {region}  ({mm[0]:.1f}, {mm[1]:.1f}, {mm[2]:.1f}){warn}"
 
-    def _refresh_targets(self, select=None):
+    def _refresh_targets(self, select=None, save=True):
+        if save: self._autosave_targets()                         # every change is kept in <patient>/targets.json
         self.tlist.blockSignals(True); self.tlist.clear()
         for n, mm in self.targets.items():
             it = QtWidgets.QListWidgetItem(self._target_text(n, mm)); it.setData(QtCore.Qt.UserRole, n)
@@ -600,6 +622,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for n, k in self.region_contacts(path, c).items(): txt += f" | region {n}: {k} contact(s) inside"
         return c, txt
 
+    def _autosave_targets(self):
+        """Write the targets to <patient>/targets.json after every change, so they are there next time."""
+        if self.patient is None or getattr(self, "_targets_folder", None) != self.patient.folder: return
+        try:
+            json.dump([{"name": n, "ras_mm": np.round(v, 2).tolist()} for n, v in self.targets.items()],
+                      open(os.path.join(self.patient.folder, "targets.json"), "w"), indent=1)
+        except OSError as ex:
+            self._log(f"could not save targets.json: {ex}")
+
     def save_targets(self):
         if self.patient is None: return
         path = os.path.join(self.patient.folder, "targets.json")
@@ -612,7 +643,7 @@ class MainWindow(QtWidgets.QMainWindow):
         path = path or QtWidgets.QFileDialog.getOpenFileName(self, "Targets", self.patient.folder, "JSON (*.json)")[0]
         if not path: return
         self.targets = {t["name"]: np.array(t["ras_mm"], float) for t in json.load(open(path))}
-        self._refresh_targets(); self._log(f"{len(self.targets)} targets loaded from {path}"); self.redraw()
+        self._refresh_targets(save=os.path.basename(path) != "targets.json" or os.path.dirname(path) != self.patient.folder); self._log(f"{len(self.targets)} targets loaded from {path}"); self.redraw()
 
     # ------------------------------------------------------------------ planning
     def plan(self):
@@ -657,8 +688,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, r in enumerate(self.paths):
             close = min(((r.min_clearance_mm.get(z, 99), z) for z in nogo), default=(None, ""))
             c, ctext = self.contact_text(r)
-            it = QtWidgets.QTreeWidgetItem([f"{i + 1}: {' -> '.join(r.targets)}", f"{r.length_mm:.0f} mm",
-                                            f"{r.min_radius_mm:.0f} mm", f"{close[1]} {close[0]} mm", ctext])
+            it = QtWidgets.QTreeWidgetItem([f"P{i + 1}: {' -> '.join(r.targets)}", f"{r.length_mm:.0f} mm",
+                                            robot_model.shape_text(r.shape), f"{close[1]} {close[0]} mm", ctext])
+            it.setToolTip(2, "straight part, then arc 1 and arc 2: length and radius (R) of each arc")
             it.setForeground(0, QtGui.QColor.fromRgbF(*PATH_COLOURS[i % len(PATH_COLOURS)]))
             if len(c.hits) < len(c.on_target): it.setForeground(4, QtGui.QColor("#f66"))
             it.setToolTip(4, "#n = contact number from the tip (1 = deepest), then the distance from the target to its centre")
@@ -758,7 +790,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.view3d is None: return
         for name in [n for n in self.view3d.items if n.startswith("path")]: self.view3d.remove(name)
         for i, r in enumerate(self.paths):
-            self.view3d.add_line(f"path{i}", r.points, PATH_COLOURS[i % len(PATH_COLOURS)], width=4)
+            lab = r.labels if r.labels is not None else np.zeros(len(r.points), int)
+            for seg, scol in robot_model.SEGMENT_COLOURS.items():   # straight / arc 1 / arc 2 in their colours
+                idx = np.where(lab == seg)[0]
+                if not len(idx): continue
+                idx = np.r_[idx[0] - 1, idx] if idx[0] > 0 else idx
+                self.view3d.add_line(f"path{i}_seg{seg}", r.points[idx], scol, width=5)
             if self.chk_contacts.isChecked():
                 c = electrode.for_path(r, self.cfg, self.plan_targets())
                 rest = [j for j in range(len(c.centres)) if j not in c.hits]

@@ -5,8 +5,7 @@ The headset only displays the result (brain + paths); all planning happens here.
 
 ![app](../docs/path_planner_app.png)
 
-Detailed description of every planning step, with formulas, weights and all `robot.toml` keys:
-[docs/TECHNICAL_DOCUMENTATION.md](../docs/TECHNICAL_DOCUMENTATION.md)
+Full documentation: [how to use the app](../docs/04-planner-app/README.md), [how the planning works](../docs/05-path-planning/README.md) (formulas, weights, MILP), [robot.toml reference](../docs/03-robot-and-config/README.md).
 
 ## Use
 1. **Open patient folder** - the output folder of `pipeline/run_pipeline.py` (needs `orig.nii.gz`,

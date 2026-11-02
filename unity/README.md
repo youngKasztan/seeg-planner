@@ -1,5 +1,7 @@
 # Unity app (Quest 3 now, optical see-through headsets later)
 
+Full documentation: [docs/06-headset-and-unity](../docs/06-headset-and-unity/README.md).
+
 Status: scripts compile-checked (C# 9) outside Unity; `RigidFit.cs` unit-tested (2000 random poses).
 Not yet run inside Unity / on a headset.
 

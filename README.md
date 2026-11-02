@@ -4,7 +4,15 @@ Planning SEEG electrode trajectories on a patient-specific brain model displayed
 
 **Status:** research prototype. Not for clinical use (would require medical-device certification, EU MDR).
 
-**Full technical documentation** (every step, algorithms, formulas, weights, `robot.toml` reference): [docs/TECHNICAL_DOCUMENTATION.md](docs/TECHNICAL_DOCUMENTATION.md)
+**Documentation: [docs/README.md](docs/README.md)** - organised in categories you can click through:
+[Overview](docs/01-overview/README.md) ·
+[Brain layers](docs/02-brain-layers/README.md) ·
+[Robot and configuration](docs/03-robot-and-config/README.md) ·
+[Planner app](docs/04-planner-app/README.md) ·
+[Path planning](docs/05-path-planning/README.md) ·
+[Headset and Unity](docs/06-headset-and-unity/README.md) ·
+[Tests and results](docs/07-tests-and-results/README.md) ·
+[Project](docs/08-project/README.md)
 
 ## What the pipeline does
 

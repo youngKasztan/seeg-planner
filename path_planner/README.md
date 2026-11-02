@@ -5,6 +5,9 @@ The headset only displays the result (brain + paths); all planning happens here.
 
 ![app](../docs/path_planner_app.png)
 
+Detailed description of every planning step, with formulas, weights and all `robot.toml` keys:
+[docs/TECHNICAL_DOCUMENTATION.md](../docs/TECHNICAL_DOCUMENTATION.md)
+
 ## Use
 1. **Open patient folder** - the output folder of `pipeline/run_pipeline.py` (needs `orig.nii.gz`,
    `aparc.DKTatlas+aseg.deep.nii.gz`, `head.nii.gz`, `mask.nii.gz`, the masks named in `robot.toml`, and
@@ -37,7 +40,7 @@ The headset only displays the result (brain + paths); all planning happens here.
 3. **Plan paths** - for every target, and for groups of 2-3 nearby targets, the planner looks for a path;
    it then decides itself how many insertions are needed (one path through several targets when that is safe).
    Every target alone takes ~10-20 s. Groups are tried after that, most promising first, until
-   `time_limit_s` (robot.toml, default 120 s); groups that cannot be shorter than separate paths are skipped.
+   `time_limit_s` (robot.toml, currently 240 s); groups that cannot be shorter than separate paths are skipped.
    **Stop** ends the planning at any time; if the single paths are already done they are kept.
 4. **Export to headset** - writes into `headset/` (about 1 min):
    - `plan.json` (targets, path points in mm and in headset metres, checks) and `paths.glb` (robot tubes + targets)

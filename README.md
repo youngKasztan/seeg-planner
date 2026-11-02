@@ -4,6 +4,8 @@ Planning SEEG electrode trajectories on a patient-specific brain model displayed
 
 **Status:** research prototype. Not for clinical use (would require medical-device certification, EU MDR).
 
+**Full technical documentation** (every step, algorithms, formulas, weights, `robot.toml` reference): [docs/TECHNICAL_DOCUMENTATION.md](docs/TECHNICAL_DOCUMENTATION.md)
+
 ## What the pipeline does
 
 Raw patient exams -> segmentation -> layer extraction -> 3D package ready for planning.

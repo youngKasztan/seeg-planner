@@ -1,115 +1,176 @@
 # SEEG Planner
 
-Planning SEEG electrode trajectories on a patient-specific brain model displayed as a hologram in a headset (Meta Quest 3 for development; optical see-through headsets as the target).
+Path planning for a **concentric-tube continuum robot** that carries an SEEG electrode. Starting from the patient's MRI exams, the system builds a 3D model of the brain with every structure that must not be damaged, plans safe **curved** paths to the targets chosen by the surgeon, and shows the brain and the paths as a hologram on the patient's head (Meta Quest 3 for development; optical see-through headsets as the target).
 
-**Status:** research prototype. Not for clinical use (would require medical-device certification, EU MDR).
+> **Status:** research prototype - **not for clinical use** (clinical use would require medical-device certification, EU MDR). Every path is an automatic proposal that must be reviewed by the surgical team.
 
-**Documentation: [docs/README.md](docs/README.md)** - organised in categories you can click through:
-[Overview](docs/01-overview/README.md) ·
-[Brain layers](docs/02-brain-layers/README.md) ·
-[Robot and configuration](docs/03-robot-and-config/README.md) ·
-[Planner app](docs/04-planner-app/README.md) ·
-[Path planning](docs/05-path-planning/README.md) ·
-[Headset and Unity](docs/06-headset-and-unity/README.md) ·
-[Tests and results](docs/07-tests-and-results/README.md) ·
-[Project](docs/08-project/README.md)
+![Planner app](docs/path_planner_app.png)
 
-## What the pipeline does
+## Documentation
 
-Raw patient exams -> segmentation -> layer extraction -> 3D package ready for planning.
+Start at **[docs/README.md](docs/README.md)**. The documentation is split into categories; every page has *previous / next* links, so it can be read page by page:
+
+1. [Overview](docs/01-overview/README.md) - what the system does, path planning in plain words, coordinates, glossary
+2. [Brain layers and patient data](docs/02-brain-layers/README.md) - pipeline, segmentation, arteries, tracts, veins, priors, layer catalogue, landmarks
+3. [Robot and configuration](docs/03-robot-and-config/README.md) - robot model (straight part + 2 arcs), every setting of `robot.toml`
+4. [Planner app](docs/04-planner-app/README.md) - how to use the desktop program: targets, target regions, planning, export
+5. [Path planning](docs/05-path-planning/README.md) - how the paths are computed, step by step: safety maps, Dijkstra, optimisation, MILP
+6. [Headset and Unity](docs/06-headset-and-unity/README.md) - Unity project, running on the Quest, landmark registration, QR head tracking
+7. [Tests and results](docs/07-tests-and-results/README.md) - automatic tests, results on the test subject IXI057
+8. [Project and repository](docs/08-project/README.md) - repository structure, limitations and roadmap, data sources
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[MRI exams: T1, TOF-MRA, DTI] --> B[Pipeline: brain layers]
+    B --> C[Planner app: targets -> robot paths]
+    R[robot.toml] --> C
+    C --> D[Headset app: hologram on the head]
+```
+
+1. **Pipeline** (`pipeline/`) - segments the brain and extracts the risk layers: arteries, veins, ventricles, nerve tracts, eloquent cortex, skull, skin. Layers that are not measured in this patient are marked as *prior* or *estimate*.
+2. **Planner app** (`path_planner/`) - the surgeon clicks targets or outlines target regions on the MRI slices. The planner finds paths of the form *straight part + arc 1 + arc 2* that keep a safety margin from every no-go zone, prefers short and gentle paths away from soft zones, tries to reach several targets with one insertion, and picks the best set of paths with an integer program (MILP).
+3. **Headset app** (`unity/`) - loads the brain and the paths, aligns them with the real head by touching facial landmarks with the controller, and follows the head with QR codes.
+
+## Quick start
+
+**1. Build the patient model** (once per patient, ~30 min on a CPU):
 
 ```
 python pipeline/run_pipeline.py --t1 T1.nii.gz --mra MRA.nii.gz \
     --dti_dir DTI/ --bvals bvals.txt --bvecs bvecs.txt \
-    [--t1_gd T1_gd.nii.gz] [--ct CT.nii.gz --ct_postimplant] \
-    [--venat VENAT_PartialVolume.nii.gz] \
     --out results/PATIENT --fastsurfer /path/to/FastSurfer
 ```
 
-| Step | Script | Input | Output |
-|---|---|---|---|
-| 1. Brain segmentation | FastSurfer (called from `run_pipeline.py`) | T1 | 95 atlas regions, brain mask |
-| 2. Head mask | `pipeline/head_mask.py` | T1 | scalp |
-| 3. Arteries | `pipeline/vessels_mra.py` | TOF-MRA + T1 | artery mask (MRA->T1 registration, Frangi filter) |
-| 3b. White-matter tracts | `pipeline/tracts_dti.py` | DTI + T1 | corticospinal L/R, arcuate L, optic radiation L/R, uncinate L/R, IFOF L/R (DIPY) |
-| 3c. Veins and sinuses | `pipeline/veins_ct1.py` | T1 before + after gadolinium | veins, sinuses (subtraction + 2-scale Frangi) - *not validated* |
-| 3d. CT | `pipeline/ct_layers.py` | CT / CTA / post-implant CT | bone + thickness, scalp, CTA arteries, electrode contacts |
-| 3e. Structural extras | `pipeline/structural_extras.py` | T1 + segmentation | sulci (patient); skull **estimate** from T1 if no CT; superior sagittal sinus **prior** if no contrast T1 |
-| 3f. Venous prior | `pipeline/atlas_priors.py` | T1 + VENAT atlas | probability map of veins, MNI152 -> patient (rigid + affine + B-spline) - **prior**, used if no contrast T1 |
-| Eloquent cortex | `pipeline/seeg_prep.py` | segmentation (DKT atlas) | motor, sensory, visual, auditory, language (language: left dominance assumed) |
-| 4. Layer package | `pipeline/seeg_prep.py` | masks | `.glb` meshes, distance maps, `manifest.json` |
-| 5. Preview | `tools/render_preview.py` | package | PNG with up to 9 views |
-| 6. Headset files | `tools/export_headset.py` | package + head mask | `patient_scene.glb` (+ lite), `headset_manifest.json`, alignment landmarks, `head_phantom.stl` |
-| 7. Robot path planning | `path_planner/app.py` (desktop app / exe) | patient folder + clicked targets | curved continuum-robot paths, `plan.json` + `paths.glb` for the headset; see [path_planner/README.md](path_planner/README.md) |
-| Registration maths | `tools/registration.py` | landmarks / surface points | rigid fit (Kabsch) + ICP, FRE/TRE (self-test) |
-| Vessel check | `tools/render_vessel_check.py` | MRA + automatic + expert masks | MIP overlay + Dice |
+Optional inputs: `--t1_gd` (contrast T1 -> patient veins), `--ct` / `--ct_postimplant`, `--venat` (venous atlas). Details: [Running the pipeline](docs/02-brain-layers/running-the-pipeline.md).
 
-## Results on test subject IXI057
+**2. Plan the paths** (desktop app, Windows):
 
-- Segmentation: ~10 min on CPU (1-2 min with a GPU)
-- Arteries vs expert manual segmentation: **Dice 0.78** (sensitivity 0.77, precision 0.80)
-- White-matter tracts (DTI, 16 directions, 1.75x1.75x2 mm): CST L 7.8 ml / R 6.6 ml, arcuate L 5.5 ml, optic radiation L 12.1 ml / R 8.3 ml
-  - bvec sign convention chosen automatically (mean streamline length 48 mm vs ~25 mm for the wrong variants)
-  - IXI: 17 volumes but the gradient table has 16 - tensor fit showed it matches volumes 0-15 (residual 0.051 vs 0.092)
-- Tractography ~3 min on CPU (~15 min including automatic bvec convention check)
-- Extra tracts: uncinate L 7.4 / R 5.7 ml, IFOF L 9.6 / R 8.1 ml
-- Layers without a source exam (clearly labelled in the manifest, `origin`):
-  - venous prior (VENAT atlas registered to the patient, ~3 min): 44.8 ml at p > 0.15
-  - superior sagittal sinus prior (anatomical rules): 9.6 ml
-  - skull estimate from T1 (no CT): 581 ml, median thickness 4.2 mm
-- Sulci (patient-derived): 86 ml
-- Headset scene: 30 layers, 600k triangles (lite 200k), 8 auto-estimated alignment landmarks (easy to find on the patient)
+```
+cd C:\Users\MSI\Desktop\seeg-planner
+.\.venv\Scripts\python.exe path_planner\app.py C:\Users\MSI\Desktop\dataMedical\IXI057
+```
 
-## Layer origin
+or double click `path_planner/run_app.bat`, or build the exe with `path_planner/build_exe.bat`. Left click on a slice = target, **Plan paths**, then **Export to headset**. Details: [Planner app](docs/04-planner-app/README.md).
 
-| Origin | Layers |
+**3. Show it on the headset**: copy the patient's `headset/` folder into `Assets/StreamingAssets/patient/` of the Unity project, build for the Quest, touch the landmarks. Details: [Headset and Unity](docs/06-headset-and-unity/README.md).
+
+## Repository structure
+
+```
+seeg-planner/
+├── README.md                    this page
+├── requirements.txt             Python libraries of the pipeline
+├── docs/                        documentation (8 categories) and images
+│
+├── pipeline/                    raw exams -> patient layers
+│   ├── run_pipeline.py          runs all steps below (resumable)
+│   ├── head_mask.py             head / skin mask from T1
+│   ├── vessels_mra.py           arteries from TOF-MRA (registration + Frangi filter)
+│   ├── tracts_dti.py            9 white-matter tracts from DTI (DIPY)
+│   ├── veins_ct1.py             veins and sinuses from contrast T1 (not validated)
+│   ├── ct_layers.py             bone, scalp, CTA arteries, implanted contacts from CT
+│   ├── structural_extras.py     sulci, skull estimate, sagittal sinus prior
+│   ├── atlas_priors.py          venous prior from the VENAT atlas
+│   └── seeg_prep.py             layer package: meshes, distance maps, eloquent cortex
+│
+├── path_planner/                desktop planner app (Python, PySide6) -> Windows exe
+│   ├── app.py                   main window: slices, 3D view, targets, regions, planning, export
+│   ├── robot.toml               ALL robot limits, no-go / soft zones and planner settings
+│   ├── config.py                reads robot.toml
+│   ├── patient.py               loads the patient, builds the safety maps
+│   ├── planner.py               the path planner (Dijkstra, optimisation, groups, MILP)
+│   ├── robot_model.py           robot shape: straight part + arc 1 + arc 2
+│   ├── electrode.py             electrode recording contacts
+│   ├── regions.py               target regions drawn as outlines
+│   ├── export.py                plan.json + paths.glb for the headset
+│   ├── headset_scene.py         brain model for the headset with the app's layers
+│   ├── layers.py, labels.py     display layers and colours, brain region names
+│   ├── view3d.py                3D view (pyqtgraph + OpenGL)
+│   ├── run_app.bat              start without building
+│   ├── build_exe.bat            build ContinuumPathPlanner.exe
+│   └── requirements.txt         libraries of the app
+│
+├── unity/                       headset app (copy of the Unity scripts)
+│   ├── Assets/SeegPlanner/
+│   │   ├── PatientLoader.cs     loads brain, paths and manifest; build-safe materials
+│   │   ├── DesktopViewer.cs     view on a laptop, edit landmarks, simulated registration
+│   │   ├── QuestControls.cs     controllers and help panel on the Quest
+│   │   ├── LandmarkRegistration.cs, RigidFit.cs   aligning the hologram with the head
+│   │   ├── HeadMarkerTracker.cs following the head with QR codes
+│   │   └── Editor/SeegMaterials.cs                materials kept in headset builds
+│   ├── Tests/RigidFitTest.cs    registration maths test (runs without Unity)
+│   └── README.md                Unity setup in short
+│
+├── tools/
+│   ├── export_headset.py        headset scene, manifest, alignment landmarks, phantom STL
+│   ├── registration.py          Kabsch + ICP registration maths (self-test)
+│   ├── make_qr_markers.py       printable QR head markers
+│   ├── render_preview.py        PNG preview of the patient model
+│   ├── render_vessel_check.py   arteries vs expert segmentation (Dice)
+│   └── docs_nav.py              rebuilds the navigation of docs/
+│
+└── tests/
+    ├── test_path_planner.py     10 planner tests on a synthetic head
+    ├── test_ct_phantom.py       CT layers on a phantom
+    └── test_veins_phantom.py    vein extraction on a phantom
+```
+
+The Unity project itself is not in the repository, only its scripts. **Patient data is never committed** (`.gitignore`: NIfTI, MGZ, DICOM, GLB, TRK, `results/`, `data/`).
+
+## Patient folder
+
+What the pipeline writes and the planner reads (example `dataMedical/IXI057`):
+
+```
+IXI057/
+├── orig.nii.gz                         T1, defines the planning grid
+├── aparc.DKTatlas+aseg.deep.nii.gz     segmentation (95 regions)
+├── mask.nii.gz, head.nii.gz            brain and head masks
+├── vessels_auto.nii.gz                 arteries
+├── tracts/                             white-matter tracts
+├── extras/                             sulci, skull estimate, sagittal sinus prior
+├── priors/                             venous prior
+├── package/                            meshes, distance maps, manifest
+├── targets.json, regions.json          written by the planner app
+└── headset/                            everything the headset needs
+    ├── headset_manifest.json           layers, coordinate system, landmarks
+    ├── patient_scene.glb (+ _lite)     brain model
+    ├── paths.glb, plan.json            planned paths (written by Export to headset)
+    └── head_phantom.stl                scalp for 3D printing a test phantom
+```
+
+## Requirements
+
+| Part | Needs |
 |---|---|
-| **patient** (from this subject's exams) | cortex, white matter, deep structures, ventricles, CSF, sulci, scalp, arteries (MRA), 9 tracts (DTI) |
-| **patient anatomy + atlas function** | eloquent cortex (DKT gyri; no fMRI; language assumed left-dominant) |
-| **prior** (population / rules, not imaged) | veins (VENAT), superior sagittal sinus |
-| **estimate** (approximate) | skull from T1 |
+| pipeline | Python 3.11, `pip install -r requirements.txt`, [FastSurfer](https://github.com/Deep-MI/FastSurfer) with PyTorch and its weights |
+| planner app | Python 3.11, `pip install -r path_planner/requirements.txt` (or the exe) |
+| headset app | Unity 6.3 LTS (URP), glTFast, Newtonsoft JSON, Unity OpenXR: Meta; Android Build Support for the Quest |
 
-Priors and estimates are replaced automatically by patient layers when the exam exists
-(contrast T1 -> `veins_ct1.py`, CT -> `ct_layers.py`).
+## Current state
 
-## Headset
+| Part | State |
+|---|---|
+| pipeline | works on IXI057 (T1, TOF-MRA, DTI); arteries vs experts **Dice 0.78**; veins from contrast T1 and CT layers tested on phantoms only |
+| planner app | robot model with 2 arcs, no-go and soft zones, target regions, multi-target paths, MILP selection, electrode contacts, export; single targets planned in ~10-30 s |
+| headset app | runs on the Quest 3 (Android build, passthrough); landmark registration confirmed on a real head; QR head tracking written, blocked by the test headset's runtime |
 
-```
-python tools/export_headset.py --package results/PATIENT/package --head results/PATIENT/head.nii.gz --t1 results/PATIENT/orig.nii.gz --out headset/
-```
-Unity loader and landmark registration: [unity/README.md](unity/README.md).
-Landmarks (nose tip, nasion, inner and outer eye corners, tragus L/R) are found in the head's own anatomical frame,
-so they work with a tilted head in the scanner. The eyes are located on the T1 (vitreous = dark ball in bright
-orbital fat); eye corners use typical eye dimensions. Check and correct them in the desktop viewer (Edit landmarks).
-
-![Landmarks](docs/IXI057_landmarks.png)
-
-![3D model](docs/IXI057_preview.png)
-![Arteries vs experts](docs/IXI057_vessels_vs_experts.png)
-
-## Missing / not validated
-
-- Veins and sinuses from the patient: code ready (phantom test), no public patient with pre/post-contrast T1 -> [docs/veins_and_ct.md](docs/veins_and_ct.md); currently replaced by priors
-- Unity scripts not yet compiled / tested on the headset
-- CT: code ready (phantom test), next step: SEEG patient with CT (Brainstorm Epileptogenicity dataset)
-- Eloquent cortex from fMRI instead of the atlas
-- White-matter tracts not yet compared with expert tractography
+Results: [Results on IXI057](docs/07-tests-and-results/results-ixi057.md). Open points: [Limitations and roadmap](docs/08-project/limitations-and-roadmap.md).
 
 ## Tests
 
 ```
+python tests/test_path_planner.py        # planner, synthetic head
 python tests/test_ct_phantom.py
 python tests/test_veins_phantom.py
-python tools/registration.py      # landmark + ICP registration self-test
-python tests/test_path_planner.py # continuum robot path planner on a synthetic head
+python tools/registration.py             # registration maths self-test
+python path_planner/app.py --selftest C:\Users\MSI\Desktop\dataMedical\IXI057   # planner on a real patient, no window
 ```
 
-## Test data
+What each test checks: [Automatic tests](docs/07-tests-and-results/automatic-tests.md).
 
-- IXI: https://brain-development.org/ixi-dataset/
-- Expert vessel segmentations for IXI: https://zenodo.org/records/17393202
-- FastSurfer weights: https://zenodo.org/records/10390573
-- VENAT venous atlas (Huck et al. 2019): https://figshare.com/articles/dataset/7205960
-- MNI152 template: bundled with nilearn
+## Data sources
 
-Patient data is never stored in the repository (`.gitignore`).
+IXI dataset (test subject IXI057), expert vessel segmentations for IXI, FastSurfer weights, VENAT venous atlas, MNI152 template - links in [Data sources and safety](docs/08-project/data-sources.md).

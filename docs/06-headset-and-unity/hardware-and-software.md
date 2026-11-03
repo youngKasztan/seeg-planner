@@ -4,14 +4,14 @@
 
 # Hardware and software
 
-> **In short:** development on a Meta Quest 3 (passthrough: the real world is filmed and shown with the hologram on top). The target are optical see-through headsets (HoloLens 2, Magic Leap 2), where the real world is seen directly. Using only OpenXR features keeps the project portable.
+> **In short:** development on a Meta Quest 3 (passthrough: the real world is filmed and shown with the hologram on top). The target is an optical see-through headset (Magic Leap 2), where the real world is seen directly. Using only OpenXR features keeps the project portable.
 
 ## Hardware
 
 | Device | Role | Notes |
 |---|---|---|
 | Meta Quest 3 | development headset | passthrough video; Horizon OS 2.x; the test unit is managed by the university |
-| HoloLens 2 / Magic Leap 2 | target | optical see-through; native QR / marker tracking |
+| Magic Leap 2 | target | optical see-through; native QR / marker tracking |
 | Windows laptop | planner app, Unity Editor, builds | |
 
 ## Software stack

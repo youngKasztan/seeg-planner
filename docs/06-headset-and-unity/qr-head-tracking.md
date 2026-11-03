@@ -58,7 +58,7 @@ e.g. `QR: 1-50MM 48/47.5mm*  2-50MM (lost)  FOLLOWING`: per code its number, mea
 
 ## Current status (2026-10-28)
 
-Code ready. On the test Quest 3 the OpenXR runtime does **not** offer the extension `XR_EXT_spatial_entity` (nor any other spatial-entity / scene extension), so AR Foundation gets no marker provider. Most likely the university's device management blocks spatial data. Options: a personal / unmanaged headset; Passthrough Camera API + OpenCV ArUco markers; or HoloLens 2 / Magic Leap 2 with native QR tracking.
+Code ready. On the test Quest 3 the OpenXR runtime does **not** offer the extension `XR_EXT_spatial_entity` (nor any other spatial-entity / scene extension), so AR Foundation gets no marker provider. Most likely the university's device management blocks spatial data. Options: a personal / unmanaged headset; Passthrough Camera API + OpenCV ArUco markers; or Magic Leap 2 with native QR tracking.
 
 <!-- nav:bar -->
 ---

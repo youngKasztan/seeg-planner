@@ -7,10 +7,12 @@
 //   Right A       : hologram on / off (to look at the real head)
 //   Left X        : skin (scalp) layer on / off, to check the fit
 //   Left grip     : hold to carry the hologram with the left controller (manual placement);
-//                   when the hologram follows the head QR codes, releasing the grip re-anchors it there
+//                   when the hologram follows the head markers, releasing the grip re-anchors it there
+//   Right stick click : layers & paths panel on / off (LayerPanel.cs). Point at it with the right controller:
+//                   right trigger = click (then it does NOT record a landmark), right grip = drag the panel
 //
 // Head tracking: HeadMarkerTracker.cs (added automatically). After >= 3 landmarks the hologram is anchored to the
-// SEEG-HEAD QR codes visible at that moment and follows the head when the person moves.
+// head markers (AprilTags TAG-n, or SEEG-HEAD QR codes) visible at that moment and follows the head when the person moves.
 // The help panel floats above the left controller (in front of you when the left controller is not tracked).
 // It is a world-space uGUI canvas: UI/Default and the built-in font are always in a player build
 // (TextMesh's font shader is not, so the old help text was invisible on the headset).
@@ -34,10 +36,11 @@ namespace SeegPlanner
         public float panelWidth = 0.24f;
 
         HeadMarkerTracker tracker;
+        LayerPanel layerPanel;
         Transform tip, panel;
         Text text;
         bool placed, hologramOn = true, scalpOn, scalpDefault;
-        bool prevTrig, prevA, prevB, prevX, prevY, prevStick, prevGrip;
+        bool prevTrig, prevA, prevB, prevX, prevY, prevStick, prevGrip, prevRStick;
         string lastButton = "-";               // shown on the panel, so a button that does nothing is easy to spot
         Vector3 grabPos; Quaternion grabRot;
         string status = "";
@@ -49,6 +52,9 @@ namespace SeegPlanner
             tracker = GetComponent<HeadMarkerTracker>();
             if (tracker == null) tracker = gameObject.AddComponent<HeadMarkerTracker>();
             tracker.loader = loader;
+            layerPanel = GetComponent<LayerPanel>();
+            if (layerPanel == null) layerPanel = gameObject.AddComponent<LayerPanel>();
+            layerPanel.loader = loader;
             tip = MakeSphere("QuestPenTip", 0.008f, Color.red);
             panel = MakePanel();
             tip.gameObject.SetActive(false); panel.gameObject.SetActive(false);
@@ -63,6 +69,8 @@ namespace SeegPlanner
             {
                 PlaceInFront(cam.transform); placed = true;
                 scalpOn = scalpDefault = IsVisible("scalp");
+                layerPanel.Build();
+                layerPanel.Toggle(cam.transform);                      // panel visible from the start
                 status = "Ready. Start with the first point.";
             }
 
@@ -74,7 +82,17 @@ namespace SeegPlanner
             tip.gameObject.SetActive(rOk);
             if (rOk) tip.position = rp + rr * tipOffset;
 
-            if (Pressed(right, CommonUsages.triggerButton, ref prevTrig) && rOk) { lastButton = "right trigger"; Capture(); }
+            // layers & paths panel: right stick click = show / hide; pointer + drag every frame
+            if (Pressed(right, CommonUsages.primary2DAxisClick, ref prevRStick)) { lastButton = "right stick"; layerPanel.Toggle(cam.transform); }
+            bool rGrip = rOk && right.TryGetFeatureValue(CommonUsages.gripButton, out bool rg) && rg;
+            layerPanel.UpdatePointer(rOk, rp, rr, rGrip, cam.transform);
+            tip.gameObject.SetActive(rOk && !layerPanel.Hovering);       // no pen tip while pointing at the panel
+
+            if (Pressed(right, CommonUsages.triggerButton, ref prevTrig) && rOk)
+            {
+                if (layerPanel.Click()) lastButton = "right trigger (panel)";
+                else { lastButton = "right trigger"; Capture(); }
+            }
             if (Pressed(right, CommonUsages.secondaryButton, ref prevB)) { lastButton = "B"; StartOver(cam.transform); }
             if (Pressed(right, CommonUsages.primaryButton, ref prevA))
             {
@@ -91,7 +109,7 @@ namespace SeegPlanner
             }
             if (Pressed(left, CommonUsages.primaryButton, ref prevX))
             {
-                lastButton = "X"; scalpOn = !scalpOn; loader.SetLayerVisible("scalp", scalpOn);
+                lastButton = "X"; scalpOn = !IsVisible("scalp"); loader.SetLayerVisible("scalp", scalpOn);   // panel may have changed it
             }
             Carry(left, lOk, lp, lr);
 
@@ -124,7 +142,7 @@ namespace SeegPlanner
             {
                 bool anchored = tracker.Calibrate();      // registration moved PatientRoot: anchor it to the head codes
                 status = $"Recorded: {Nice(n)}. Fit error (FRE) {registration.LastFreMm:F1} mm\n" +
-                         (anchored ? "Anchored to the head QR code(s)." : "No head QR code visible - the hologram will NOT follow the head.");
+                         (anchored ? "Anchored to the head marker(s)." : "No head marker visible - the hologram will NOT follow the head.");
             }
             else status = $"Recorded: {Nice(n)} ({registration.CapturedCount} of at least 3)";
         }
@@ -137,6 +155,7 @@ namespace SeegPlanner
                 : $"<b>Touch: {Nice(n).ToUpper()}</b>\n{Hint(n)}\n(patient's own left / right)\nRight trigger = record    Y (or left stick click) = skip";
             return $"{task}\n\n<i>{status}</i>\n\n{tracker.StatusLine()}\n\n" +
                    "A = hologram on/off    X = skin on/off\nB = START AGAIN    Left grip = move the brain\n" +
+                   "Right stick click = layers & paths panel\n" +
                    $"<size=18>last button: {lastButton}</size>";
         }
 
@@ -175,8 +194,8 @@ namespace SeegPlanner
             if (grip) { root.rotation = r * grabRot; root.position = p + r * grabPos; }
             tracker.Paused = grip;
             if (!grip && prevGrip && tracker.Following)          // manual correction: re-anchor to the head codes
-                status = tracker.Calibrate() ? "Moved by hand and re-anchored to the QR code(s)."
-                                             : "Moved by hand - no QR code visible, the old anchoring is kept.";
+                status = tracker.Calibrate() ? "Moved by hand and re-anchored to the head marker(s)."
+                                             : "Moved by hand - no head marker visible, the old anchoring is kept.";
             prevGrip = grip;
         }
 

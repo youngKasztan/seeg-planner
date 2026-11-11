@@ -1,26 +1,23 @@
-// HeadMarkerTracker.cs - keeps the hologram on the real head when the person moves, using QR codes on the head.
+// HeadMarkerTracker.cs - keeps the hologram on the real head when the person moves, using markers on the head.
 //
-// Idea: the QR code(s) are fixed rigidly to the head (headband; in the OR on the Mayfield clamp).
+// Idea: the markers are fixed rigidly to the head (headband; in the OR on the Mayfield clamp).
 //   1. Landmark registration (LandmarkRegistration.cs) puts PatientRoot on the real head.
-//   2. Calibrate(): for every head QR code seen right now we store PatientRoot relative to that code:
+//   2. Calibrate(): for every head marker seen right now we store PatientRoot relative to that marker:
 //        T_marker<-root = inverse(T_world<-marker) * T_world<-root
-//   3. Every frame: T_world<-root = T_world<-marker(now) * T_marker<-root  (averaged over all visible head codes,
-//      smoothed). When no head code is visible the hologram stays where it was last.
-// Head codes that were not visible during Calibrate() are added automatically the first time they are seen together
-// with an already calibrated code (so a headband with 3 codes keeps working when the head turns).
+//   3. Every frame: T_world<-root = T_world<-marker(now) * T_marker<-root  (averaged over all visible head markers,
+//      smoothed). When no head marker is visible the hologram stays where it was last.
+// Head markers that were not visible during Calibrate() are added automatically the first time they are seen together
+// with an already anchored marker (so a headband with 3 markers keeps working when the head turns).
 //
-// Marker detection: AR Foundation ARMarkerManager (AR Foundation >= 6.4). On Meta Quest the provider is the package
-// "Unity OpenXR: Spatial Entities" (com.unity.xr.spatialentities-openxr), Meta Horizon OS supports QR codes only.
-// Without a provider the tracker does nothing and reports "no marker provider".
+// Marker sources (each one calls Report(id, pose) with world poses):
+//   * AprilTagCameraSource (default): AprilTags (tagStandard41h12) found in the Quest passthrough camera image.
+//     Ids are reported as "TAG-<n>". See AprilTagCameraSource.cs for the project settings it needs.
+//   * QR codes through AR Foundation ARMarkerManager + "Unity OpenXR: Spatial Entities" (useQrCodes). Off by default:
+//     on the test Quest 3 (runtime 209.161) the OpenXR runtime does not offer XR_EXT_spatial_entity, so there is no
+//     marker subsystem. Payloads "SEEG-HEAD-<n>-<size>MM".
 //
-// Project Settings > XR Plug-in Management > OpenXR (Android): enable the "Spatial Entities" feature group and
-// "Spatial Entities: Markers" only; in its gear window enable QR Code detection, "Markers are fixed size" with the
-// REAL printed side length (50 mm code * 0.95 = 0.0475 m) and leave "Markers are static" OFF (the head moves).
-//
-// Payload convention (see the printed sheet): "SEEG-HEAD-<n>-<size>MM", e.g. "SEEG-HEAD-1-50MM".
 // printScale: the printer does not print at exactly 100 % (university printer: 100 mm -> 95 mm), so the real size
-// of a code is nominal * printScale. The runtime measures the code size itself (ARMarker.size); the expected size is
-// shown next to it on the help panel as a check of the tracking and is used by any size-dependent code later.
+// of a marker is nominal * printScale. Used by the AprilTag pose estimation (tag size) and for the QR size check.
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text.RegularExpressions;
@@ -34,133 +31,105 @@ namespace SeegPlanner
     public class HeadMarkerTracker : MonoBehaviour
     {
         public PatientLoader loader;
-        [Tooltip("Only QR codes whose text starts with this prefix are treated as head markers")]
-        public string headPrefix = "SEEG-HEAD";
+        [Tooltip("Marker ids starting with one of these prefixes are treated as head markers")]
+        public string[] headPrefixes = { "TAG-", "SEEG-HEAD" };
         [Tooltip("Real printed size / nominal size. University printer: 95 mm instead of 100 mm -> 0.95")]
         public float printScale = 0.95f;
         [Tooltip("Smoothing time constant in seconds (0 = jump straight to the new pose)")]
-        public float smoothing = 0.15f;
+        public float smoothing = 0.2f;
         [Tooltip("Position jumps larger than this (metres) are applied immediately instead of smoothed")]
         public float snapDistance = 0.10f;
+        [Tooltip("A marker counts as visible if it was reported within this many seconds")]
+        public float freshSeconds = 0.4f;
+        [Tooltip("Detect AprilTags in the passthrough camera image (AprilTagCameraSource)")]
+        public bool useAprilTags = true;
+        [Tooltip("Use QR codes via AR Foundation markers (needs XR_EXT_spatial_entity on the headset)")]
+        public bool useQrCodes = false;
 
-        /// True while a calibration exists and is applied (hologram follows the head codes).
+        /// True while a calibration exists and is applied (hologram follows the head markers).
         public bool Following { get; private set; }
         /// Set by QuestControls while the hologram is carried by hand, so the tracker does not fight the grip.
         public bool Paused { get; set; }
+        /// One status line from the active marker source (camera permission, detection rate, latency...).
+        public string SourceStatus { get; set; } = "";
 
-        class Entry
+        class Obs
         {
-            public string payload;
-            public float nominalMm;                 // from the payload ("...-50MM"), 0 if unknown
-            public float lastSeen = -1f;            // Time.time of the last added/updated event
+            public Vector3 pos;
+            public Quaternion rot;
+            public float time = -100f;          // Time.time of the last report
+            public float sizeM;                 // measured (QR) or assumed (AprilTag) edge length
+            public float expectedM;             // expected real size from the printed sheet (0 = unknown)
         }
 
         struct Anchor { public Vector3 pos; public Quaternion rot; }   // T_marker<-root
 
-        readonly Dictionary<TrackableId, Entry> entries = new();
-        // Anchors are kept per payload (not per TrackableId): the runtime may drop a code that left the view and
-        // report it again later under a new id - it must still be anchored.
+        readonly Dictionary<string, Obs> observations = new();
         readonly Dictionary<string, Anchor> anchors = new();
-        ARMarkerManager manager;
         Vector3 smoothPos; Quaternion smoothRot = Quaternion.identity;
-        float startTime;
         string lastEvent = "";
+        AprilTagCameraSource aprilSource;
 
-        static readonly Regex SizeRe = new Regex(@"-(\d+(?:\.\d+)?)MM$", RegexOptions.IgnoreCase);
+        // ---------------------------------------------------------------- input from the marker sources
 
-        /// Expected real edge length (metres) of a code with this payload, after the printer scale; 0 if unknown.
-        public float ExpectedSizeM(string payload)
+        /// A marker source saw marker `id` at this world pose now. sizeM/expectedM are only used for the status line.
+        public void Report(string id, Vector3 worldPos, Quaternion worldRot, float sizeM = 0f, float expectedM = 0f)
         {
-            var m = SizeRe.Match(payload ?? "");
-            if (!m.Success) return 0f;
-            return float.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) * 0.001f * printScale;
+            if (string.IsNullOrEmpty(id)) return;
+            if (!observations.TryGetValue(id, out var o))
+            {
+                o = new Obs();
+                observations[id] = o;
+                lastEvent = "new marker: " + id;
+                Debug.Log("[HeadMarkerTracker] " + lastEvent);
+            }
+            o.pos = worldPos; o.rot = worldRot; o.time = Time.time; o.sizeM = sizeM; o.expectedM = expectedM;
         }
+
+        bool IsHead(string id)
+        {
+            foreach (var p in headPrefixes)
+                if (id.StartsWith(p, System.StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        bool Fresh(Obs o) => Time.time - o.time <= freshSeconds;
 
         void Start()
         {
-            startTime = Time.time;
-            var origin = FindAnyObjectByType<XROrigin>();
-            if (origin == null) { lastEvent = "no XR Origin in the scene"; return; }
-            manager = origin.GetComponent<ARMarkerManager>();
-            if (manager == null) manager = origin.gameObject.AddComponent<ARMarkerManager>();
-            manager.trackablesChanged.AddListener(OnMarkersChanged);
-#if UNITY_ANDROID && !UNITY_EDITOR
-            // Meta's runtime does not even offer the spatial entity OpenXR extensions (XR_EXT_spatial_entity, ...)
-            // to an app without the spatial data permission, so the Spatial Entities package never creates its marker
-            // subsystem and therefore never asks for the permission itself. Ask here; the extensions are enumerated
-            // when the OpenXR instance is created, so after the first "Allow" the app must be started once more.
-            if (!UnityEngine.Android.Permission.HasUserAuthorizedPermission(ScenePermission))
+            if (useAprilTags)
             {
-                var cb = new UnityEngine.Android.PermissionCallbacks();
-                cb.PermissionGranted += _ => { permissionJustGranted = true; };
-                cb.PermissionDenied += _ => { lastEvent = "spatial data permission denied"; };
-                UnityEngine.Android.Permission.RequestUserPermission(ScenePermission, cb);
+                aprilSource = GetComponent<AprilTagCameraSource>();
+                if (aprilSource == null) aprilSource = gameObject.AddComponent<AprilTagCameraSource>();
+                aprilSource.tracker = this;
             }
-#endif
+            if (useQrCodes) StartQr();
         }
 
-        const string ScenePermission = "com.oculus.permission.USE_SCENE";
-        bool permissionJustGranted;
+        // ---------------------------------------------------------------- anchoring
 
-        void OnDestroy()
-        {
-            if (manager != null) manager.trackablesChanged.RemoveListener(OnMarkersChanged);
-        }
-
-        void OnMarkersChanged(ARTrackablesChangedEventArgs<ARMarker> args)
-        {
-            foreach (var m in args.added) Seen(m);
-            foreach (var m in args.updated) Seen(m);
-            foreach (var kv in args.removed) entries.Remove(kv.Key);
-        }
-
-        void Seen(ARMarker m)
-        {
-            if (!entries.TryGetValue(m.trackableId, out var e))
-            {
-                string text = null;
-                if (m.markerType == XRMarkerType.QRCode || m.markerType == XRMarkerType.MicroQRCode)
-                {
-                    var r = manager.TryGetStringData(m);             // allocates - done once per code
-                    if (r.status.IsSuccess()) text = r.value;
-                }
-                e = new Entry { payload = text ?? "" };
-                var sm = SizeRe.Match(e.payload);
-                if (sm.Success) e.nominalMm = float.Parse(sm.Groups[1].Value, CultureInfo.InvariantCulture);
-                entries[m.trackableId] = e;
-                lastEvent = "new code: " + (text ?? "(no text)");
-                Debug.Log($"[HeadMarkerTracker] {lastEvent}, measured size {m.size.x * 1000f:F1} mm");
-            }
-            e.lastSeen = Time.time;
-        }
-
-        bool IsHead(Entry e) => e.payload.StartsWith(headPrefix, System.StringComparison.OrdinalIgnoreCase);
-
-        static bool Tracked(ARMarker m) => m != null && m.trackingState == TrackingState.Tracking;
-
-        /// Anchor the hologram (at its current pose) to all head codes visible now. Returns false if none is visible.
+        /// Anchor the hologram (at its current pose) to all head markers visible now. Returns false if none is visible.
         public bool Calibrate()
         {
-            if (manager == null || loader == null || !loader.IsLoaded) return false;
+            if (loader == null || !loader.IsLoaded) return false;
             var root = loader.PatientRoot;
             anchors.Clear();
             int n = 0;
-            foreach (var kv in entries)
+            foreach (var kv in observations)
             {
-                var e = kv.Value; var m = manager.GetMarker(kv.Key);
-                if (!IsHead(e) || !Tracked(m)) continue;
-                Store(e, m.transform, root.position, root.rotation);
+                if (!IsHead(kv.Key) || !Fresh(kv.Value)) continue;
+                Store(kv.Key, kv.Value, root.position, root.rotation);
                 n++;
             }
-            if (n == 0) { lastEvent = "calibrate: no head code visible"; return false; }
+            if (n == 0) { lastEvent = "calibrate: no head marker visible"; return false; }
             smoothPos = root.position; smoothRot = root.rotation;
             Following = true;
-            lastEvent = $"anchored to {n} head code(s)";
+            lastEvent = $"anchored to {n} head marker(s)";
             Debug.Log("[HeadMarkerTracker] " + lastEvent);
             return true;
         }
 
-        /// Forget the anchoring (B = start again). The hologram no longer follows the codes.
+        /// Forget the anchoring (B = start again). The hologram no longer follows the markers.
         public void StopFollowing()
         {
             Following = false;
@@ -168,27 +137,25 @@ namespace SeegPlanner
             lastEvent = "not anchored";
         }
 
-        void Store(Entry e, Transform marker, Vector3 rootPos, Quaternion rootRot)
+        void Store(string id, Obs o, Vector3 rootPos, Quaternion rootRot)
         {
-            var inv = Quaternion.Inverse(marker.rotation);
-            anchors[e.payload] = new Anchor { pos = inv * (rootPos - marker.position), rot = inv * rootRot };
+            var inv = Quaternion.Inverse(o.rot);
+            anchors[id] = new Anchor { pos = inv * (rootPos - o.pos), rot = inv * rootRot };
         }
-
-        bool Anchored(Entry e) => IsHead(e) && anchors.ContainsKey(e.payload);
 
         void LateUpdate()
         {
-            if (!Following || Paused || manager == null || loader == null || !loader.IsLoaded) return;
+            if (useQrCodes) PollQr();
+            if (!Following || Paused || loader == null || !loader.IsLoaded) return;
 
-            // target pose of PatientRoot = average over all visible calibrated head codes
+            // target pose of PatientRoot = average over all visible anchored head markers
             Vector3 sumPos = Vector3.zero; Vector4 sumRot = Vector4.zero; int n = 0; Quaternion refRot = Quaternion.identity;
-            foreach (var kv in entries)
+            foreach (var kv in observations)
             {
-                var e = kv.Value; if (!Anchored(e)) continue;
-                var m = manager.GetMarker(kv.Key); if (!Tracked(m)) continue;
-                var a = anchors[e.payload];
-                Vector3 p = m.transform.position + m.transform.rotation * a.pos;
-                Quaternion r = m.transform.rotation * a.rot;
+                if (!anchors.TryGetValue(kv.Key, out var a) || !Fresh(kv.Value)) continue;
+                var o = kv.Value;
+                Vector3 p = o.pos + o.rot * a.pos;
+                Quaternion r = o.rot * a.rot;
                 if (n == 0) refRot = r;
                 if (Quaternion.Dot(refRot, r) < 0f) r = new Quaternion(-r.x, -r.y, -r.z, -r.w);   // same hemisphere
                 sumPos += p; sumRot += new Vector4(r.x, r.y, r.z, r.w); n++;
@@ -198,13 +165,12 @@ namespace SeegPlanner
             sumRot.Normalize();
             var targetRot = new Quaternion(sumRot.x, sumRot.y, sumRot.z, sumRot.w);
 
-            // head codes seen for the first time while the head is tracked: calibrate them from the current target
-            foreach (var kv in entries)
+            // head markers seen for the first time while the head is tracked: anchor them from the current target
+            foreach (var kv in observations)
             {
-                var e = kv.Value; if (!IsHead(e) || Anchored(e)) continue;
-                var m = manager.GetMarker(kv.Key); if (!Tracked(m)) continue;
-                Store(e, m.transform, targetPos, targetRot);
-                lastEvent = "added head code " + e.payload;
+                if (!IsHead(kv.Key) || anchors.ContainsKey(kv.Key) || !Fresh(kv.Value)) continue;
+                Store(kv.Key, kv.Value, targetPos, targetRot);
+                lastEvent = "added head marker " + kv.Key;
             }
 
             float k = smoothing <= 0f ? 1f : 1f - Mathf.Exp(-Time.deltaTime / smoothing);
@@ -217,69 +183,86 @@ namespace SeegPlanner
             root.SetPositionAndRotation(smoothPos, smoothRot);
         }
 
-        static readonly string[] RequiredExtensions =
-            { "XR_EXT_future", "XR_EXT_spatial_entity", "XR_EXT_spatial_marker_tracking" };
-        string diagnosis;
-
-        /// Why there is no marker subsystem: Spatial Entities creates it only if the headset's OpenXR runtime offers
-        /// all three extensions. Shows which are offered (available) / switched on (enabled) and the runtime version.
-        string RuntimeDiagnosis()
-        {
-            if (diagnosis != null) return diagnosis;
-            var available = new HashSet<string>(UnityEngine.XR.OpenXR.OpenXRRuntime.GetAvailableExtensions() ?? new string[0]);
-            var parts = new List<string>();
-            foreach (var ext in RequiredExtensions)
-            {
-                string state = UnityEngine.XR.OpenXR.OpenXRRuntime.IsExtensionEnabled(ext) ? "on"
-                             : available.Contains(ext) ? "available, off" : "MISSING";
-                parts.Add(ext.Replace("XR_EXT_", "") + ": " + state);
-            }
-            string perm = "?";
-#if UNITY_ANDROID && !UNITY_EDITOR
-            perm = UnityEngine.Android.Permission.HasUserAuthorizedPermission(ScenePermission) ? "yes" : "NO";
-#endif
-            diagnosis = string.Join(", ", parts) + "\nruntime " + UnityEngine.XR.OpenXR.OpenXRRuntime.name + " " +
-                        UnityEngine.XR.OpenXR.OpenXRRuntime.version + ", spatial data permission: " + perm;
-            Debug.Log("[HeadMarkerTracker] no marker subsystem: " + diagnosis.Replace("\n", " | "));
-            // full list of spatial/scene/marker related extensions the runtime offers (for logcat -s Unity)
-            var related = new List<string>();
-            foreach (var ext in available)
-            {
-                string l = ext.ToLowerInvariant();
-                if (l.Contains("spatial") || l.Contains("marker") || l.Contains("scene") || l.Contains("future"))
-                    related.Add(ext + (UnityEngine.XR.OpenXR.OpenXRRuntime.IsExtensionEnabled(ext) ? "(on)" : ""));
-            }
-            related.Sort();
-            Debug.Log($"[HeadMarkerTracker] runtime offers {available.Count} extensions; related: " + string.Join(" ", related));
-            return diagnosis;
-        }
-
         /// One or two lines for the help panel.
         public string StatusLine()
         {
-            if (manager == null) return "QR: " + (lastEvent == "" ? "not started" : lastEvent);
-            if (manager.subsystem == null && permissionJustGranted)
-                return "QR: spatial data permission granted.\n<b>Close the app and start it again</b> to enable QR tracking.";
-            if (manager.subsystem == null)
-                return Time.time - startTime < 3f ? "QR: starting..." : "QR: no marker provider\n<size=18>" + RuntimeDiagnosis() + "</size>";
+            var cam = Camera.main != null ? Camera.main.transform : null;
             var parts = new List<string>();
-            foreach (var kv in entries)
+            foreach (var kv in observations)
             {
-                var e = kv.Value; var m = manager.GetMarker(kv.Key);
-                string name = e.payload == "" ? "?" : e.payload.Replace(headPrefix + "-", "");
-                string state = Tracked(m) ? "" : " (lost)";
-                string size = m != null ? $" {m.size.x * 1000f:F0}" : "";
-                float exp = ExpectedSizeM(e.payload);
-                if (exp > 0f) size += $"/{exp * 1000f:F1}mm";
-                parts.Add(name + size + state + (Anchored(e) ? "*" : ""));
+                var o = kv.Value;
+                if (Time.time - o.time > 5f) continue;             // forget markers not seen for a while (display only)
+                string name = kv.Key.Replace("SEEG-HEAD-", "QR");
+                string dist = cam != null ? $" {(o.pos - cam.position).magnitude:F2}m" : "";
+                string size = o.expectedM > 0f ? $" {o.sizeM * 1000f:F0}/{o.expectedM * 1000f:F1}mm" : "";
+                parts.Add(name + dist + size + (Fresh(o) ? "" : " (lost)") + (anchors.ContainsKey(kv.Key) ? "*" : ""));
             }
-            string seen = parts.Count == 0 ? "no code seen" : string.Join("  ", parts);
+            string seen = parts.Count == 0 ? "no marker seen" : string.Join("  ", parts);
             string mode = Following ? (Paused ? "PAUSED (grip)" : "FOLLOWING") : "not anchored";
+            string src = SourceStatus;
+            if (useQrCodes) src += (src == "" ? "" : " | ") + QrStatus();
+            return $"Markers {mode}: {seen}\n<size=18>{src}\n{lastEvent}   (* = anchored)</size>";
+        }
+
+        // ================================================================ QR codes (AR Foundation markers), optional
+
+        static readonly Regex SizeRe = new Regex(@"-(\d+(?:\.\d+)?)MM$", RegexOptions.IgnoreCase);
+        const string ScenePermission = "com.oculus.permission.USE_SCENE";
+        ARMarkerManager qrManager;
+        readonly Dictionary<TrackableId, string> qrPayloads = new();
+        float qrStart;
+
+        /// Expected real edge length (metres) of a QR code with this payload, after the printer scale; 0 if unknown.
+        public float ExpectedSizeM(string payload)
+        {
+            var m = SizeRe.Match(payload ?? "");
+            if (!m.Success) return 0f;
+            return float.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) * 0.001f * printScale;
+        }
+
+        void StartQr()
+        {
+            qrStart = Time.time;
+            var origin = FindAnyObjectByType<XROrigin>();
+            if (origin == null) { lastEvent = "no XR Origin in the scene"; return; }
+            qrManager = origin.GetComponent<ARMarkerManager>();
+            if (qrManager == null) qrManager = origin.gameObject.AddComponent<ARMarkerManager>();
 #if UNITY_ANDROID && !UNITY_EDITOR
+            // Meta's runtime enumerates the spatial entity extensions only for apps with the spatial data permission,
+            // and the Spatial Entities package never asks for it when its subsystem was not created. Ask here.
             if (!UnityEngine.Android.Permission.HasUserAuthorizedPermission(ScenePermission))
-                mode += ", permission: no";
+                UnityEngine.Android.Permission.RequestUserPermission(ScenePermission);
 #endif
-            return $"QR {mode}: {seen}\n<size=18>{lastEvent}   (size measured/expected, * = anchored)</size>";
+        }
+
+        void PollQr()
+        {
+            if (qrManager == null || qrManager.subsystem == null) return;
+            foreach (var m in qrManager.trackables)
+            {
+                if (m.trackingState != TrackingState.Tracking) continue;
+                if (!qrPayloads.TryGetValue(m.trackableId, out var payload))
+                {
+                    payload = "";
+                    if (m.markerType == XRMarkerType.QRCode || m.markerType == XRMarkerType.MicroQRCode)
+                    {
+                        var r = qrManager.TryGetStringData(m);          // allocates - done once per code
+                        if (r.status.IsSuccess()) payload = r.value;
+                    }
+                    qrPayloads[m.trackableId] = payload;
+                }
+                if (payload == "") continue;
+                Report(payload, m.transform.position, m.transform.rotation, m.size.x, ExpectedSizeM(payload));
+            }
+        }
+
+        string QrStatus()
+        {
+            if (qrManager == null) return "QR: not started";
+            if (qrManager.subsystem != null) return "QR: running";
+            if (Time.time - qrStart < 3f) return "QR: starting...";
+            bool entity = UnityEngine.XR.OpenXR.OpenXRRuntime.IsExtensionEnabled("XR_EXT_spatial_entity");
+            return "QR: no marker provider (XR_EXT_spatial_entity " + (entity ? "on" : "MISSING") + ")";
         }
     }
 }

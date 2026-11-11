@@ -47,5 +47,5 @@ The pen tip offset is a fixed guess (no tool-tip calibration yet); skin moves un
 
 <!-- nav:bar -->
 ---
-← [Controls and help panel](controls-and-help-panel.md) | [↑ Headset and Unity](README.md) | [QR head tracking](qr-head-tracking.md) →
+← [Controls and help panel](controls-and-help-panel.md) | [↑ Headset and Unity](README.md) | [Head tracking with markers](qr-head-tracking.md) →
 <!-- /nav:bar -->

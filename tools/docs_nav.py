@@ -66,7 +66,7 @@ PAGES = [
         ("running-on-the-quest.md", "Running on the Quest", "Meta Horizon Link, Android build, logs"),
         ("controls-and-help-panel.md", "Controls and help panel", "controller buttons, pen tip, panel"),
         ("landmark-registration.md", "Landmark registration", "procedure, Horn / Kabsch maths, FRE, ICP"),
-        ("qr-head-tracking.md", "QR head tracking", "following the head, markers, settings, current status"),
+        ("qr-head-tracking.md", "Head tracking with markers", "following the head, AprilTag camera source, markers, settings"),
         ("troubleshooting.md", "Troubleshooting", "pink model, no marker provider, other problems"),
     ]),
     ("07-tests-and-results", "Tests and results", [

@@ -18,7 +18,7 @@ The headset only **displays** what the desktop planner exported; it does not pla
 5. [Running on the Quest](running-on-the-quest.md) - Meta Horizon Link, Android build, logs
 6. [Controls and help panel](controls-and-help-panel.md) - controller buttons, pen tip, panel
 7. [Landmark registration](landmark-registration.md) - procedure, Horn / Kabsch maths, FRE, ICP
-8. [QR head tracking](qr-head-tracking.md) - following the head, markers, settings, current status
+8. [Head tracking with markers](qr-head-tracking.md) - following the head, AprilTag camera source, markers, settings
 9. [Troubleshooting](troubleshooting.md) - pink model, no marker provider, other problems
 <!-- /nav:pages -->
 

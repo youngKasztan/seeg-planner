@@ -4,7 +4,7 @@
 
 # Controls and help panel
 
-> **In short:** the right controller has a red pen tip for touching landmarks; buttons show/hide the hologram and the skin, restart, skip a landmark, and the left grip carries the brain by hand. A help panel above the left controller always says what to do next. A second, movable **Layers & paths** panel switches brain layers and robot paths on and off.
+> **In short:** the right controller has a red pen tip for touching landmarks; buttons show/hide the hologram and the skin, restart, skip a landmark, and the left grip carries the brain by hand. A help panel above the left controller always says what to do next. A second, movable **Layers & paths** panel switches brain layers and robot paths on and off and shows **MRI slices** inside the hologram.
 
 `QuestControls.cs` (works over Link and in the Android build; does nothing without a headset).
 
@@ -20,6 +20,7 @@
 | Left grip (hold) | carry the hologram with the left controller (manual placement); pauses marker following; on release, if the hologram follows the head markers, it is re-anchored at the new place |
 | Right stick click | Layers & paths panel on / off |
 | Right grip (hold, pointing at the panel) | drag the Layers & paths panel; it keeps facing you and stays where you release it |
+| Right grip (hold, NOT on the panel) + move the hand | scroll the MRI slice chosen on the panel through the head (the slice moves as far as the hand moves along the slice normal) |
 
 ## Help panel
 
@@ -33,15 +34,24 @@ A world-space UI panel (uGUI, 600 px scaled to 0.24 m) floats above the left con
 
 ## Layers & paths panel
 
-`LayerPanel.cs` (added automatically by `QuestControls`). It is visible from the start, 0.65 m in front of you and 0.25 m to the right, about 0.42 m wide.
+`LayerPanel.cs` (added automatically by `QuestControls`). It is visible from the start, 0.65 m in front of you and 0.25 m to the right, about 0.38 m wide.
 
 ![Layers & paths panel (layout preview for IXI057)](layer_panel_preview.png)
 
 - **Layers:** the same layers, groups (Anatomy, No-go zones, Soft zones, Head) and colours as the planner app's layer list, read from `headset_manifest.json`. A grey square = layer hidden. Click a layer to switch it; click a group title to switch the whole group (if anything in the group is visible, all of it is hidden, otherwise all of it is shown).
 - **Robot paths:** one row per path from `plan.json` (id, targets, length). A row switches every part of that path (`path_<n>_straight`, `_arc1`, `_arc2`, `_contacts`, `_contacts_on_target`, or `path_<n>` from older exports). **Targets** switches all target spheres; **All paths on / off** switches every path.
-- **Pointing:** the right controller's ray is intersected with the panel plane; a cyan laser and dot show where it points and the row under it is highlighted. While pointing at the panel the pen tip is hidden and the right trigger clicks the panel (no landmark is recorded).
+- **Pointing:** the right controller's ray is intersected with the panel plane; a cyan laser and dot show where it points and the row under it is highlighted. While pointing at the panel the pen tip is hidden and the right trigger clicks the panel (no landmark is recorded). The head blocks the laser (a sphere of 11 cm radius around the head centre) and the panel ignores the controller while it is within 22 cm of the head centre, so touching landmarks never clicks the panel behind the head.
 - The colours always show the real state of the layers, so changes made with buttons (e.g. X = skin) appear on the panel too.
 - No EventSystem or XR Interaction Toolkit is needed: the clicks are found geometrically, uGUI is used only for drawing.
+
+## MRI slice mode
+
+`SliceViewer.cs` (added automatically by `QuestControls`), data `mri_volume.bytes` / `.json` from the planner's [Export to headset](../04-planner-app/export-to-headset.md#mri_volume).
+
+- The **MRI slice** section of the panel shows three thumbnails (sagittal, axial, coronal) at their current positions. **Click a thumbnail** = that T1 slice appears inside the hologram, at its true place in the head (outside the head it is transparent, inside 85 % opaque). Click it again or **Slice off** = hide.
+- **Scrolling:** hold the right grip (not on the panel) and move the hand: the slice moves along its normal by the same distance as the hand (1 voxel = 1 mm). The panel shows e.g. `Axial 108/215 (2 mm sup)` = slice number and distance from the head centre.
+- The slice is a child of `PatientRoot`, so it follows registration, head-marker tracking and carrying by hand. Each plane remembers its own position.
+- Texture layout (u right, v up): axial u = left, v = posterior; coronal u = left, v = superior; sagittal u = posterior, v = superior. The axial thumbnail is flipped to show anterior up.
 
 <!-- nav:bar -->
 ---

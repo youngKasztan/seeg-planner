@@ -10,7 +10,8 @@
 | help text invisible on the headset | `TextMesh` font shader stripped | the panel uses uGUI (already done) |
 | `headset_manifest.json not found` | Package Folder wrong / StreamingAssets empty | set Package Folder (Editor) or copy the headset files to `Assets/StreamingAssets/patient/` |
 | old plan shown on the headset | old files in StreamingAssets | export again, copy, rebuild (files are copied at every start) |
-| hologram does not follow the head | no head marker visible at calibration | panel says "No head marker visible"; show a marker and press grip / release, or touch the landmarks again |
+| hologram does not follow the head | registration not done (`not anchored`) or no head marker visible at calibration (`WAITING`) | the hologram follows only after at least 3 landmarks are recorded; with `WAITING (show a marker)` look at a marker with the head still - it anchors by itself |
+| landmark not recorded, the panel reacts instead | the laser went through the head to the Layers & paths panel | fixed: the head blocks the laser and the panel ignores the controller within 22 cm of the head centre; otherwise move the panel aside |
 | `QR: no marker provider` + diagnosis `spatial_entity: MISSING` | the runtime does not offer the OpenXR spatial-entity extensions | the QR source is off by default; head tracking uses AprilTags - see [Head tracking with markers](qr-head-tracking.md) |
 | `AprilTag camera: no camera image - enable 'Camera Image Support'` | camera image capture is off | Project Settings -> OpenXR (Android) -> Meta Quest: Camera (Passthrough) gear -> Camera Image Support on; rebuild |
 | `AprilTag camera: waiting for camera permission` / `DENIED` | the headset camera permission was not granted | answer the permission dialog; or Settings -> Privacy -> App permissions -> camera for the app |

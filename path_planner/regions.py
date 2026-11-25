@@ -1,5 +1,9 @@
 """
-regions.py - target regions drawn by the doctor: "the robot has to go into this area".
+regions.py - areas drawn by the doctor, of two kinds:
+  - target region ("target"): the robot has to go into this area;
+  - no-go area ("nogo"): the robot must stay out of this area, e.g. a place on a planned path that the doctor
+    does not like or considers dangerous. It is added to the planner's no-go zones; planning again then finds
+    new paths around it (the paths are re-planned, not moved by hand, so every robot limit and margin still holds).
 
 How a region is made (no 3D drawing needed):
   1. draw its outline with the mouse on a slice of one view (e.g. axial),
@@ -9,7 +13,11 @@ where all prisms overlap (a "visual hull"): the axial outline gives left-right a
 adds up-down. With only one outline the region is a thin slab around that slice (slab_mm). By default the region
 is also clipped to the brain. Drawing again in the same view replaces that view's outline.
 
-Planning (Planner.region_tip): the tip of the robot may end anywhere inside the region - the planner picks the
+No-go areas are clipped to the head instead of the brain (an area may also cover a skin entry), and with only one
+outline they are a thicker slab (planning.user_nogo_slab_mm, default 5 mm) so that a path cannot slip just above
+or below them.
+
+Planning of target regions (Planner.region_tip): the tip of the robot may end anywhere inside the region - the planner picks the
 point that is easiest to reach safely (kept a little inside the edge when possible); other electrode contacts may
 lie in the region as well, the app reports how many.
 
@@ -21,6 +29,7 @@ import numpy as np
 from matplotlib.path import Path
 
 UV_DIMS = {2: (0, 1), 1: (0, 2), 0: (1, 2)}                     # view axis -> volume dims shown as (u, v)
+NOGO_COLOUR = (1.0, 0.15, 0.15)
 COLOURS = [(1.0, 0.85, 0.0), (0.0, 1.0, 0.8), (1.0, 0.4, 0.0), (0.6, 1.0, 0.2), (0.9, 0.5, 1.0)]
 VIEW_NAMES = {2: "axial", 1: "coronal", 0: "sagittal"}
 
@@ -40,13 +49,17 @@ def outline_mask(axis, shape, verts):
 
 
 class Region:
-    def __init__(self, name, colour):
-        self.name, self.colour = name, colour
+    def __init__(self, name, colour, kind="target"):
+        self.name, self.colour, self.kind = name, colour, kind      # kind: "target" or "nogo"
         self.outlines = {}                     # view axis -> (slice index k, vertices N x 2 in (u, v) voxel units)
         self.mask = None
 
     def set_outline(self, axis, k, verts):
         self.outlines[axis] = (int(k), np.asarray(verts, float))
+
+    @property
+    def is_nogo(self):
+        return self.kind == "nogo"
 
     def views(self):
         return ", ".join(VIEW_NAMES[a] for a in sorted(self.outlines, reverse=True)) or "no outline yet"
@@ -72,7 +85,7 @@ class Region:
 
     # ------------------------------------------------------------------ save / load (outlines in RAS mm)
     def to_json(self, vox_to_mm):
-        out = {"name": self.name, "colour": list(self.colour), "outlines": []}
+        out = {"name": self.name, "kind": self.kind, "colour": list(self.colour), "outlines": []}
         for axis, (k, verts) in self.outlines.items():
             mm = vox_to_mm(to_ijk(axis, verts[:, 0], verts[:, 1], k))
             out["outlines"].append({"view": VIEW_NAMES[axis], "vertices_ras_mm": np.round(mm, 2).tolist()})
@@ -80,7 +93,7 @@ class Region:
 
     @staticmethod
     def from_json(d, mm_to_vox):
-        r = Region(d["name"], tuple(d.get("colour", COLOURS[0])))
+        r = Region(d["name"], tuple(d.get("colour", COLOURS[0])), d.get("kind", "target"))
         axis_of = {v: a for a, v in VIEW_NAMES.items()}
         for o in d["outlines"]:
             axis = axis_of[o["view"]]

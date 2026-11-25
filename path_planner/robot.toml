@@ -38,6 +38,8 @@ time_limit_s          = 240   # after this, no more groups of targets are tried 
 entry_candidates      = 3     # entry points tried per path
 optimizer_iterations  = 150   # x 8 = shape evaluations per optimisation step
 curvature_weight      = 0.1   # cost of bending; only tight arcs cost much (prefers wide arcs, does not forbid curving)
+user_nogo_margin_mm   = 1.0   # no-go areas drawn in the app ("New no-go area"): gap the robot surface keeps from them
+user_nogo_slab_mm     = 5.0   # ... a no-go area drawn in one view only is this thick on each side of its slice
 
 [entry_zone]                  # uses the landmarks in headset/headset_manifest.json
 exclude_face               = true

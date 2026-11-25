@@ -108,31 +108,39 @@ namespace SeegPlanner
 
         // ---------------------------------------------------------------- anchoring
 
-        /// Anchor the hologram (at its current pose) to all head markers visible now. Returns false if none is visible.
-        public bool Calibrate()
+        /// Anchor the hologram (at its current pose) to all head markers visible now.
+        /// If none is visible: keepOldIfNoneVisible keeps the existing anchoring (manual carry); otherwise the anchoring
+        /// is PENDING and happens automatically the first time the camera sees a head marker (keep the head still).
+        public bool Calibrate(bool keepOldIfNoneVisible = false)
         {
             if (loader == null || !loader.IsLoaded) return false;
             var root = loader.PatientRoot;
-            anchors.Clear();
-            int n = 0;
+            var visible = new List<string>();
             foreach (var kv in observations)
+                if (IsHead(kv.Key) && Fresh(kv.Value)) visible.Add(kv.Key);
+            if (visible.Count == 0)
             {
-                if (!IsHead(kv.Key) || !Fresh(kv.Value)) continue;
-                Store(kv.Key, kv.Value, root.position, root.rotation);
-                n++;
+                if (keepOldIfNoneVisible && Following) { lastEvent = "no head marker visible - old anchoring kept"; return false; }
+                anchors.Clear(); Following = false; Pending = true;
+                lastEvent = "waiting for a head marker to anchor";
+                return false;
             }
-            if (n == 0) { lastEvent = "calibrate: no head marker visible"; return false; }
+            anchors.Clear();
+            foreach (var id in visible) Store(id, observations[id], root.position, root.rotation);
             smoothPos = root.position; smoothRot = root.rotation;
-            Following = true;
-            lastEvent = $"anchored to {n} head marker(s)";
+            Following = true; Pending = false;
+            lastEvent = $"anchored to {visible.Count} head marker(s)";
             Debug.Log("[HeadMarkerTracker] " + lastEvent);
             return true;
         }
 
+        /// True when a calibration was asked for while no head marker was visible (it will happen when one is seen).
+        public bool Pending { get; private set; }
+
         /// Forget the anchoring (B = start again). The hologram no longer follows the markers.
         public void StopFollowing()
         {
-            Following = false;
+            Following = false; Pending = false;
             anchors.Clear();
             lastEvent = "not anchored";
         }
@@ -146,6 +154,11 @@ namespace SeegPlanner
         void LateUpdate()
         {
             if (useQrCodes) PollQr();
+            if (Pending && !Paused && loader != null && loader.IsLoaded)
+            {
+                foreach (var kv in observations)
+                    if (IsHead(kv.Key) && Fresh(kv.Value)) { Calibrate(); break; }
+            }
             if (!Following || Paused || loader == null || !loader.IsLoaded) return;
 
             // target pose of PatientRoot = average over all visible anchored head markers
@@ -198,7 +211,7 @@ namespace SeegPlanner
                 parts.Add(name + dist + size + (Fresh(o) ? "" : " (lost)") + (anchors.ContainsKey(kv.Key) ? "*" : ""));
             }
             string seen = parts.Count == 0 ? "no marker seen" : string.Join("  ", parts);
-            string mode = Following ? (Paused ? "PAUSED (grip)" : "FOLLOWING") : "not anchored";
+            string mode = Following ? (Paused ? "PAUSED (grip)" : "FOLLOWING") : Pending ? "WAITING (show a marker)" : "not anchored";
             string src = SourceStatus;
             if (useQrCodes) src += (src == "" ? "" : " | ") + QrStatus();
             return $"Markers {mode}: {seen}\n<size=18>{src}\n{lastEvent}   (* = anchored)</size>";

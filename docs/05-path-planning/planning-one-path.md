@@ -12,13 +12,15 @@
 
 > **Why Dijkstra:** it finds the cheapest route through the whole 3D maze, so a good start exists even when the straight line is blocked. One run from the target gives the cost to *every* skin point at once.
 
-`skimage.graph.MCP_Geometric` on the [cost grid](route-grid-and-entry-points.md), 26-neighbourhood, **started at the target**. A step between neighbouring cells $`a, b`$ costs
+`grid_paths.GridMCP` (same definition as `skimage.graph.MCP_Geometric`, see below) on the [cost grid](route-grid-and-entry-points.md), 26-neighbourhood, **started at the target**. A step between neighbouring cells $`a, b`$ costs
 
 ```math
 \text{step}(a, b) = \lVert a - b\rVert \cdot \frac{\text{cost}(a) + \text{cost}(b)}{2}\qquad(\lVert a-b\rVert = 1,\ \sqrt2 \text{ or } \sqrt3 \text{ cells})
 ```
 
 Cells within `target_tolerance_mm` / grid = 1.5 cells of the target that are free of strict zones get $`\min(\text{cost}, 2)`$, so a target next to the ventricle wall stays reachable. The cumulative cost to every cell is **cached by target position**; the route from any skin cell is read back by traceback.
+
+`grid_paths.GridMCP` runs Dijkstra with `scipy.sparse.csgraph.dijkstra` on the graph of the passable cells, or, if that module cannot be loaded, by repeated relaxation over the 26 neighbour shifts in NumPy (slower, same result). It replaced `skimage.graph.MCP_Geometric` after Windows Smart App Control blocked scikit-image's compiled module `_mcp`; on random test grids both give exactly the same costs.
 
 ## 2. Entry candidates
 

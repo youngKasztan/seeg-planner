@@ -20,6 +20,8 @@ The exe build (PyInstaller) bundles `robot.toml` and copies it next to the exe, 
 
 **Windows Smart App Control** may block an unsigned exe; then use `run_app.bat`. The 3D view uses pyqtgraph + PyOpenGL (pure Python) because the earlier VTK / pyvista view was blocked by Smart App Control (unsigned DLLs).
 
+Smart App Control can also start blocking a single compiled file of a library that worked before (its cloud reputation changes), e.g. `ImportError: DLL load failed while importing _mcp: Zasady kontroli aplikacji zablokowały ten plik.` (scikit-image's Dijkstra). The app therefore no longer needs scikit-image: route search uses `grid_paths.py` (SciPy, with a NumPy fallback) and surfaces use `surface.py` (marching cubes if scikit-image loads, otherwise a NumPy voxel surface). The log line `route search: Dijkstra via ...; 3D surfaces: ...` after loading a patient shows which variant is used. Do not turn Smart App Control off.
+
 ## Self-test without a window
 
 ```

@@ -34,6 +34,7 @@ k = 1 - e^{-\Delta t / 0.2\,\text{s}},\qquad p \leftarrow p + k\,(p_{\text{targe
    jumps larger than 10 cm snap at once ($`k = 1`$). A marker counts as visible if it was seen in the last 0.4 s. With no marker visible the hologram keeps its last pose.
 4. Markers that were not visible during calibration are **added automatically** the first time they are seen together with an already anchored marker (a headband with 3 markers keeps working when the head turns).
 5. Anchors are stored per marker id (`TAG-0`, `TAG-1`, ... or the QR text).
+6. **No marker visible at calibration** (e.g. the hand covers the camera while touching the last landmark): the anchoring becomes **pending** (`WAITING (show a marker)` on the panel) and happens automatically the first time the camera sees a head marker. Keep the head still until the status says `FOLLOWING`. Releasing the left grip with no marker visible keeps the old anchoring.
 
 ## AprilTag camera source
 
@@ -95,7 +96,7 @@ Markers FOLLOWING: TAG-0 0.55m*  TAG-1 0.61m (lost)*
 AprilTag camera 14 Hz, 1 tag(s), latency 38 ms
 ```
 
-per marker: id, distance from the headset, `(lost)` = not seen now, `*` = anchored; mode `FOLLOWING`, `PAUSED (grip)` or `not anchored`. Second line: images per second, tags in the last image, image latency; or the camera state (`waiting for camera permission`, `no camera image - enable 'Camera Image Support'`, `camera pose: DEFAULT (...)` if the camera-in-head pose could not be read).
+per marker: id, distance from the headset, `(lost)` = not seen now, `*` = anchored; mode `FOLLOWING`, `PAUSED (grip)`, `WAITING (show a marker)` (pending anchoring) or `not anchored` (no registration yet, or B pressed). Second line: images per second, tags in the last image, image latency; or the camera state (`waiting for camera permission`, `no camera image - enable 'Camera Image Support'`, `camera pose: DEFAULT (...)` if the camera-in-head pose could not be read).
 
 ## QR codes (optional, not working on the test headset)
 

@@ -45,6 +45,8 @@ Note on *Closest no-go*: the value is the distance from the robot **surface** to
 | `NOT REACHED: T4 - its paths come too close to another chosen path` | lost to a collision in the final choice |
 | `region R1: tip at (...), reachable, 3 point(s) of the region tried` | region tip chosen |
 | `path 1 electrode: ...` | contacts per path |
+| `N1: P1 pass(es) through this no-go area - press 'Plan paths' to re-plan` | a drawn [no-go area](no-go-areas.md) blocks a current path |
+| `1 drawn no-go area(s) added to the no-go zones` | drawn no-go areas applied at the start of planning |
 
 <!-- nav:bar -->
 ---

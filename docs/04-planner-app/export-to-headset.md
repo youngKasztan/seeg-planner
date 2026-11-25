@@ -4,7 +4,7 @@
 
 # Export to headset
 
-> **In short:** writes the plan and the brain model into the patient's `headset/` folder (~1 min), in headset coordinates and with the same layers as in the app. Then copy that folder into the Unity project.
+> **In short:** writes the plan, the brain model and the T1 image for the slice mode into the patient's `headset/` folder (~1 min), in headset coordinates and with the same layers as in the app. Then copy that folder into the Unity project.
 
 Needs planned paths and `headset/headset_manifest.json` (from `tools/export_headset.py`). Targets and regions are saved first.
 
@@ -16,6 +16,7 @@ Needs planned paths and `headset/headset_manifest.json` (from `tools/export_head
 | `paths.glb` | 3D tubes of the paths, contacts, target spheres |
 | `patient_scene.glb` / `patient_scene_lite.glb` | brain model with the app's layers and groups (600 k / 200 k triangles) |
 | `headset_manifest.json` | `layers` replaced by the app's layers; landmarks and coordinate system unchanged |
+| `mri_volume.bytes` / `mri_volume.json` | T1 on a 1 mm grid in the headset's axes, for the MRI slice mode ([Controls](../06-headset-and-unity/controls-and-help-panel.md)) |
 | `*_pipeline.glb`, `headset_manifest_pipeline.json` | the pipeline's original files, kept once |
 
 ## plan.json
@@ -55,6 +56,16 @@ Needs planned paths and `headset/headset_manifest.json` (from `tools/export_head
 Built by `headset_scene.py` from the app's layer list (brain, No-go zones, Soft zones, Anatomy, Head, Target regions; `outside_brain` left out): marching cubes (Gaussian smoothing σ = 1 voxel for layers > 20 ml, 0.5 for thin ones), Taubin smoothing (10 iterations), quadric decimation to the triangle budget. Opacity: grey/white matter, scalp, skull 0.15; target regions 0.35; others 0.2 if > 20 ml, else opaque. Each layer is a named node; the manifest lists name, group, category, visibility, opacity, colour, origin and volume.
 
 Coordinates: $`p_{\text{scene}} = R\,(p_{\text{RAS}} - c_{\text{head}})/1000`$, identical for all three files ([Coordinates](../01-overview/coordinates-and-units.md)).
+
+## mri_volume
+
+Written by `mri_volume.py` from the planner's T1 (`orig.nii.gz`, cropped to the head). The T1 is resampled (trilinear) onto a 1 mm grid whose axes are the axes of the hologram in Unity (`PatientRoot` local, glTFast mirrors glTF x):
+
+```math
+x = -\frac{R - c_R}{1000},\qquad y = \frac{S - c_S}{1000},\qquad z = -\frac{A - c_A}{1000}
+```
+
+i.e. voxel index i -> +x (patient left), j -> +y (superior), k -> +z (posterior). `mri_volume.bytes` = uint8, x fastest; intensities mapped linearly from the 0.5-99.5 % percentiles inside the head to 1-255; 0 = outside the head (drawn transparent). `mri_volume.json`: `dims`, `spacing_m`, `origin_local_m` (position of voxel 0,0,0), `intensity_window`. Checked on IXI057: the landmarks of the manifest match to 0.006 mm and lie on the skin of the volume (0-1 mm); tests in `tests/test_mri_volume.py`. IXI057: 167 x 215 x 218 voxels, 7.8 MB. Stand-alone: `python path_planner/mri_volume.py <patient folder>`.
 
 Next: [Unity project setup](../06-headset-and-unity/unity-project-setup.md).
 

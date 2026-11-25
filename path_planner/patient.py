@@ -135,15 +135,41 @@ class Patient:
             d = ndimage.distance_transform_edt(~m, sampling=self.vox).astype(np.float32)
             self.zone_dist[name] = Field(d, self.affine, 50.0); self.soft_masks[name] = m
             soft += z["weight"] * np.exp(-d / z["scale_mm"])
+        self._strict_base = strict                                  # robot.toml zones only (set_user_nogo adds to it)
         self.C_strict = Field(strict, self.affine, -10.0)
         self.C_ignorable = Field(ign, self.affine, 1e3)
         self.C_outside = Field(outside, self.affine, -10.0)
         self.soft = Field(soft, self.affine, 0.0)
-        self.nogo_union = np.zeros(self.shape, bool)
-        for n, m in self.zone_masks.items():
-            if "outside_of" not in cfg["no_go"][n]: self.nogo_union |= m
+        self._update_nogo_union()
         self.soft_union = np.zeros(self.shape, bool)
         for m in self.soft_masks.values(): self.soft_union |= m
+
+    def _update_nogo_union(self):
+        self.nogo_union = np.zeros(self.shape, bool)
+        for n, m in self.zone_masks.items():
+            if "outside_of" not in self.cfg["no_go"].get(n, {}): self.nogo_union |= m
+
+    def set_user_nogo(self, areas, margin_mm, log=None):
+        """No-go areas drawn by the doctor, {name: boolean mask}: added to the strict safety field on top of the
+        robot.toml zones (replacing the previously added set). Each becomes a no-go zone 'user_<name>' in
+        cfg['no_go'] with this margin, so target checks, clearances and the paths table include it.
+        The planner must be refreshed afterwards (Planner.refresh_fields). log: where to report (the current task's
+        log; self.log belongs to the loading task and may no longer exist)."""
+        r = self.cfg["robot"]["diameter_mm"] / 2
+        ng = self.cfg.setdefault("no_go", {})
+        for n in [n for n, z in ng.items() if z.get("user")]:
+            ng.pop(n); self.zone_dist.pop(n, None); self.zone_masks.pop(n, None)
+        strict = self._strict_base.copy()
+        for name, m in areas.items():
+            if m is None or not m.any(): continue
+            zn = f"user_{name}"
+            d = ndimage.distance_transform_edt(~m, sampling=self.vox).astype(np.float32)
+            self.zone_dist[zn] = Field(d, self.affine, 0.0); self.zone_masks[zn] = m
+            ng[zn] = {"margin_mm": float(margin_mm), "ignore_near_targets": False, "user": True}
+            strict = np.minimum(strict, d - margin_mm - r)
+            (log or self.log)(f"  no-go area {name} (drawn): {m.sum() * self.vox.prod() / 1000:.1f} ml, margin {margin_mm:g} mm")
+        self.C_strict = Field(strict, self.affine, -10.0)
+        self._update_nogo_union()
 
     def sample(self, pts):
         """C_strict, C_ignorable, C_outside and soft at pts (N x 3, RAS mm) with one coordinate transform

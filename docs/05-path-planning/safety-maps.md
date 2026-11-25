@@ -38,6 +38,16 @@ $`c_z(x) \ge 0`$ <=> a robot body centred at $`x`$ keeps at least the margin fro
 
 Examples: arteries ($`m`$ = 2 mm) -> the robot axis stays at least 3 mm from any artery voxel; `outside_brain` ($`m`$ = 1 mm) -> the arcs stay at least 2 mm inside the brain mask.
 
+## No-go areas drawn by the doctor
+
+After planning, the doctor may mark a place a path should not go through ([No-go areas](../04-planner-app/no-go-areas.md)). Each drawn area $`A`$ gets its own distance map and is added to the strict map with the margin $`m`$ = `user_nogo_margin_mm` (1 mm):
+
+```math
+C_{\text{strict}}(x) = \min\Big(C_{\text{strict}}^{\text{robot.toml}}(x),\ \ \min_{A}\big(d_A(x) - m - r\big)\Big)
+```
+
+`Patient.set_user_nogo` keeps the map of the `robot.toml` zones and recomputes only this minimum, so adding or deleting an area takes seconds, not a full reload. The areas also appear as no-go zones `user_<name>`, so target checks and the reported clearances include them. Afterwards `Planner.refresh_fields` rebuilds the [cost grid](route-grid-and-entry-points.md) and forgets the cached Dijkstra routes.
+
 ## Soft map
 
 ```math

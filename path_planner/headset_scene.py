@@ -14,7 +14,7 @@ import json, os, shutil
 import numpy as np
 import trimesh
 from scipy import ndimage
-from skimage import measure
+import surface                                 # marching cubes (with a fallback if scikit-image is blocked)
 
 import export
 
@@ -28,7 +28,7 @@ def mask_mesh(mask, vox_to_mm, sigma):
     """Smooth surface of a binary mask, vertices in RAS mm."""
     m = ndimage.gaussian_filter(np.pad(mask, 2).astype(np.float32), sigma) if sigma > 0 else np.pad(mask, 2).astype(np.float32)
     if m.max() < 0.5: return None
-    v, f, _, _ = measure.marching_cubes(m, 0.5)
+    v, f = surface.marching_cubes(m, 0.5)
     mesh = trimesh.Trimesh(vox_to_mm(v - 2), f, process=True)
     trimesh.smoothing.filter_taubin(mesh, iterations=10)
     return mesh
@@ -37,7 +37,7 @@ def mask_mesh(mask, vox_to_mm, sigma):
 def opacity(key, ml):
     """Same rule as the 3D view of the app: large layers faint, small ones solid."""
     if key in ("gray_matter", "white_matter", "scalp", "skull_t1"): return 0.15
-    if key.startswith("region_"): return 0.35                          # target region: see the path inside it
+    if key.startswith(("region_", "nogo_")): return 0.35              # drawn areas: see the path inside / around them
     return 0.2 if ml > 20 else 1.0
 
 

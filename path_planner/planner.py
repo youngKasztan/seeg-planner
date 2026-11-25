@@ -4,7 +4,7 @@ planner.py - path planning for a concentric-tube continuum robot (shape: robot_m
 The robot is pushed in straight first (any length), then two pre-curved tubes come out: arc 1 and arc 2,
 each a circular arc of at most 35 mm with its own minimum radius and its own bending plane. For one ordered
 list of targets the planner
-  1. finds a coarse collision-free route on a grid (Dijkstra / minimum-cost path, skimage.graph.MCP):
+  1. finds a coarse collision-free route on a grid (Dijkstra / minimum-cost path, grid_paths.GridMCP):
      cheap where the brain is far from no-go zones, impassable inside them;
   2. fits the robot shape to that route and optimises it (Powell, penalty continuation). The shape is built
      backwards from the last target (tip direction -> arc 2 -> arc 1 -> straight back to the skin), so the tip
@@ -30,7 +30,7 @@ from scipy import ndimage
 import warnings
 from scipy.optimize import minimize, OptimizeWarning
 warnings.filterwarnings("ignore", category=OptimizeWarning)   # Powell: start point on a bound is fine
-from skimage.graph import MCP_Geometric
+from grid_paths import GridMCP                             # Dijkstra; replaces skimage.graph.MCP_Geometric
 from scipy.spatial import cKDTree
 
 import robot_model
@@ -65,6 +65,13 @@ class Planner:
         self.mcp = {}
         self.head_f = Field(self.p.head.astype(np.float32), self.p.affine, 0.0)   # where the straight part leaves the head
         self.entry_tree = cKDTree(self.entry_pts) if len(self.entry_pts) else cKDTree(np.zeros((1, 3)) + 1e6)
+
+    def refresh_fields(self):
+        """Call after the patient's safety fields changed (no-go areas drawn by the doctor): rebuilds the coarse
+        cost grid and forgets every cached route and direction. The skin entry points do not change."""
+        self._build_search_grid()
+        self.mcp = {}
+        for a in ("_dir_cache", "_arr_cache"): self.__dict__.pop(a, None)
 
     # ------------------------------------------------------------------ coarse grid
     def _build_search_grid(self):
@@ -142,7 +149,7 @@ class Planner:
         near = sub[np.linalg.norm(sub - ti, axis=1) <= r]
         free = self.g_ign_free[tuple(near.T)]
         cost[tuple(near[free].T)] = np.minimum(np.nan_to_num(cost[tuple(near[free].T)], posinf=2.0), 2.0)
-        m = MCP_Geometric(cost, fully_connected=True)
+        m = GridMCP(cost)
         cum, _ = m.find_costs([tuple(ti)])
         self.mcp[key] = (m, cum)
         return m, cum
@@ -570,7 +577,7 @@ class Planner:
     def _skin_field(self):
         """Coarse cost of the cheapest route from any allowed skin entry to every grid cell (one Dijkstra, cached)."""
         if getattr(self, "_skin_cum", None) is None:
-            m = MCP_Geometric(self.g_cost, fully_connected=True)
+            m = GridMCP(self.g_cost)
             self._skin_cum, _ = m.find_costs([tuple(i) for i in self.entry_idx])
         return self._skin_cum
 

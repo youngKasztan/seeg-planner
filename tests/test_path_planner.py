@@ -6,6 +6,7 @@ Continuum-robot path planner on a synthetic head (no patient data needed):  pyth
   ... 8. electrode contacts every 5 mm from the tip; a target 20 mm above the tip lies on contact 5
   9. target region from two outlines (axial square + coronal square = a cube); the planner puts the tip inside it
  10. two targets that are NOT on one straight line: one path, straight through the first, then bending onto the second
+ 11. no-go area drawn by the doctor on a planned path: planning again gives a new path that keeps out of it
 """
 import os, sys, tempfile
 import numpy as np, nibabel as nib
@@ -140,4 +141,26 @@ with tempfile.TemporaryDirectory() as d:
     print(f"10. curved two-target path: feasible {r10.feasible}, passes A within {miss:.2f} mm, shape {r10.shape}")
     assert r10.feasible and miss <= cfg["planning"]["target_pass_mm"] and np.linalg.norm(r10.points[-1] - B10) < 1e-6
     assert (r10.shape["arc1_mm"] + r10.shape["arc2_mm"]) > 5 and min(r10.shape["arc1_radius_mm"] or 1e9, r10.shape["arc2_radius_mm"] or 1e9) < 1e3
+
+    # 11. the doctor does not like a place on a planned path: a no-go area there, then plan again
+    T11 = np.array([-8.0, -12.0, -5.0])                              # deep target: the path is long enough
+    before = pl.plan_sequence(["T"], [T11])
+    dist_tip = np.r_[np.cumsum(np.linalg.norm(np.diff(before.points[::-1], axis=0), axis=1))[::-1], 0.0]
+    spot = before.points[np.argmin(np.abs(dist_tip - 14.0))]          # a point 14 mm back from the tip, in the brain
+    X = np.stack(np.meshgrid(*[np.arange(n) for n in pt.shape], indexing="ij"), -1)
+    area = np.linalg.norm(pt.vox_to_mm(X.reshape(-1, 3)).reshape(X.shape) - spot, axis=-1) <= 4.0
+    base = pt.C_strict.data.copy()
+    pt.set_user_nogo({"N1": area}, 1.0); pl.refresh_fields()
+    after = pl.plan_sequence(["T"], [T11])
+    gap = np.linalg.norm(after.points - spot, axis=1).min()
+    print(f"11. no-go area (r 4 mm) on the path at {np.round(spot, 1)}: before {before.min_clearance_mm.get('arteries')} mm "
+          f"to arteries; after re-planning feasible {after.feasible}, clearance to the area {after.min_clearance_mm['user_N1']} mm, "
+          f"path axis {gap:.1f} mm from its centre")
+    assert after.feasible and after.min_clearance_mm["user_N1"] >= 1.0 - 0.1 and gap >= 4.0 + 1.0 + 1.0 - 0.2
+    assert "user_N1" in cfg["no_go"] and pl.check_target(spot)          # a target in the area would be reported
+    nreg = regions.Region("N1", regions.NOGO_COLOUR, "nogo"); nreg.set_outline(2, 50, sq(29.5, 39.5, 34.5, 44.5))
+    back = regions.Region.from_json(nreg.to_json(pt.vox_to_mm), pt.mm_to_vox)
+    assert back.is_nogo and not regions.Region.from_json(reg.to_json(pt.vox_to_mm), pt.mm_to_vox).is_nogo
+    pt.set_user_nogo({}, 1.0); pl.refresh_fields()                       # area deleted: back to the robot.toml zones
+    assert "user_N1" not in cfg["no_go"] and (pt.C_strict.data == base).all()
 print("OK")

@@ -36,6 +36,12 @@ Full documentation: [how to use the app](../docs/04-planner-app/README.md), [how
    allowed entries), plans the 3 best in full and keeps the cheapest; then the region is planned like a point
    target (also together with other targets on one path). The path list shows how many electrode contacts lie in
    the region. The region is exported to the headset as layer `region_<name>` (group *Target regions*).
+
+   **No-go areas** (a planned path goes through a place you do not like): press **New no-go area** and draw its
+   outline the same way (one or two views). Press **Plan paths** again: the area is added to the no-go zones
+   (margin `user_nogo_margin_mm`, robot.toml) and every path is planned anew around it - paths are re-planned, not
+   moved by hand, so all robot limits and margins still hold. The log says which current paths cross a newly
+   drawn area. Details: [docs/04-planner-app/no-go-areas.md](../docs/04-planner-app/no-go-areas.md).
 3. **Plan paths** - for every target, and for groups of 2-3 nearby targets, the planner looks for a path;
    it then decides itself how many insertions are needed (one path through several targets when that is safe).
    Every target alone takes ~10-20 s. Groups are tried after that, most promising first, until

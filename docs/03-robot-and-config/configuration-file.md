@@ -57,6 +57,8 @@ time_limit_s          = 240
 entry_candidates      = 3
 optimizer_iterations  = 150
 curvature_weight      = 0.1
+user_nogo_margin_mm   = 1.0
+user_nogo_slab_mm     = 5.0
 
 [entry_zone]
 exclude_face               = true

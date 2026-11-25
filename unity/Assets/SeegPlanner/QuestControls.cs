@@ -10,6 +10,7 @@
 //                   when the hologram follows the head markers, releasing the grip re-anchors it there
 //   Right stick click : layers & paths panel on / off (LayerPanel.cs). Point at it with the right controller:
 //                   right trigger = click (then it does NOT record a landmark), right grip = drag the panel
+//   Right grip (not on the panel) + move the hand : scroll the MRI slice chosen on the panel (SliceViewer.cs)
 //
 // Head tracking: HeadMarkerTracker.cs (added automatically). After >= 3 landmarks the hologram is anchored to the
 // head markers (AprilTags TAG-n, or SEEG-HEAD QR codes) visible at that moment and follows the head when the person moves.
@@ -37,6 +38,7 @@ namespace SeegPlanner
 
         HeadMarkerTracker tracker;
         LayerPanel layerPanel;
+        SliceViewer sliceViewer;
         Transform tip, panel;
         Text text;
         bool placed, hologramOn = true, scalpOn, scalpDefault;
@@ -55,6 +57,10 @@ namespace SeegPlanner
             layerPanel = GetComponent<LayerPanel>();
             if (layerPanel == null) layerPanel = gameObject.AddComponent<LayerPanel>();
             layerPanel.loader = loader;
+            sliceViewer = GetComponent<SliceViewer>();
+            if (sliceViewer == null) sliceViewer = gameObject.AddComponent<SliceViewer>();
+            sliceViewer.loader = loader;
+            layerPanel.slices = sliceViewer;
             tip = MakeSphere("QuestPenTip", 0.008f, Color.red);
             panel = MakePanel();
             tip.gameObject.SetActive(false); panel.gameObject.SetActive(false);
@@ -69,6 +75,8 @@ namespace SeegPlanner
             {
                 PlaceInFront(cam.transform); placed = true;
                 scalpOn = scalpDefault = IsVisible("scalp");
+                sliceViewer.Load();                                    // MRI slice volume (if exported)
+                layerPanel.head = loader.PatientRoot;                  // touching the head never clicks the panel
                 layerPanel.Build();
                 layerPanel.Toggle(cam.transform);                      // panel visible from the start
                 status = "Ready. Start with the first point.";
@@ -86,6 +94,7 @@ namespace SeegPlanner
             if (Pressed(right, CommonUsages.primary2DAxisClick, ref prevRStick)) { lastButton = "right stick"; layerPanel.Toggle(cam.transform); }
             bool rGrip = rOk && right.TryGetFeatureValue(CommonUsages.gripButton, out bool rg) && rg;
             layerPanel.UpdatePointer(rOk, rp, rr, rGrip, cam.transform);
+            sliceViewer.UpdateScroll(rGrip, !layerPanel.Hovering && !layerPanel.Dragging, rp);   // grip off the panel
             tip.gameObject.SetActive(rOk && !layerPanel.Hovering);       // no pen tip while pointing at the panel
 
             if (Pressed(right, CommonUsages.triggerButton, ref prevTrig) && rOk)
@@ -142,7 +151,7 @@ namespace SeegPlanner
             {
                 bool anchored = tracker.Calibrate();      // registration moved PatientRoot: anchor it to the head codes
                 status = $"Recorded: {Nice(n)}. Fit error (FRE) {registration.LastFreMm:F1} mm\n" +
-                         (anchored ? "Anchored to the head marker(s)." : "No head marker visible - the hologram will NOT follow the head.");
+                         (anchored ? "Anchored to the head marker(s)." : "No head marker visible now - keep the head still and look at a marker, it anchors as soon as one is seen.");
             }
             else status = $"Recorded: {Nice(n)} ({registration.CapturedCount} of at least 3)";
         }
@@ -156,6 +165,7 @@ namespace SeegPlanner
             return $"{task}\n\n<i>{status}</i>\n\n{tracker.StatusLine()}\n\n" +
                    "A = hologram on/off    X = skin on/off\nB = START AGAIN    Left grip = move the brain\n" +
                    "Right stick click = layers & paths panel\n" +
+                   (sliceViewer.Mode != SliceViewer.Plane.Off ? "Right grip + move hand = scroll the MRI slice\n" : "") +
                    $"<size=18>last button: {lastButton}</size>";
         }
 
@@ -193,8 +203,8 @@ namespace SeegPlanner
             }
             if (grip) { root.rotation = r * grabRot; root.position = p + r * grabPos; }
             tracker.Paused = grip;
-            if (!grip && prevGrip && tracker.Following)          // manual correction: re-anchor to the head codes
-                status = tracker.Calibrate() ? "Moved by hand and re-anchored to the head marker(s)."
+            if (!grip && prevGrip && (tracker.Following || tracker.Pending))   // manual correction: re-anchor to the head codes
+                status = tracker.Calibrate(true) ? "Moved by hand and re-anchored to the head marker(s)."
                                              : "Moved by hand - no head marker visible, the old anchoring is kept.";
             prevGrip = grip;
         }

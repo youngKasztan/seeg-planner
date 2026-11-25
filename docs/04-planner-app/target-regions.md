@@ -25,6 +25,10 @@ Each outline is extended through the whole volume along its view axis (a prism).
 
 The axial outline gives left-right and front-back, the coronal one adds up-down. With only one outline the region is a slab of ±2 mm (5 slices at 1 mm) around that slice.
 
+## The other kind: no-go areas
+
+The same drawing tools make **no-go areas** (button *New no-go area*): places the paths must avoid, e.g. a part of a planned path you do not like. See [No-go areas drawn by the doctor](no-go-areas.md).
+
 ## Saving
 
 Outlines are stored in RAS mm in `regions.json` (they survive a different crop of the scan); masks as `regions/<name>.nii.gz` for other tools.
@@ -35,5 +39,5 @@ How the tip inside the region is chosen: [Targets check and region tips](../05-p
 
 <!-- nav:bar -->
 ---
-← [Targets](targets.md) | [↑ Planner app (desktop)](README.md) | [Layers and the 3D view](layers-and-3d-view.md) →
+← [Targets](targets.md) | [↑ Planner app (desktop)](README.md) | [No-go areas drawn by the doctor](no-go-areas.md) →
 <!-- /nav:bar -->

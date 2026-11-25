@@ -42,6 +42,7 @@ PAGES = [
         ("opening-a-patient.md", "Opening a patient", "required files, what is computed, files the app writes"),
         ("targets.md", "Targets", "add, rename, safety check, snap to a safe point"),
         ("target-regions.md", "Target regions", "drawing outlines, visual hull, saving"),
+        ("no-go-areas.md", "No-go areas drawn by the doctor", "mark a place the paths must avoid, then re-plan"),
         ("layers-and-3d-view.md", "Layers and the 3D view", "layer groups, tags, colours, transparency"),
         ("planning-and-results.md", "Planning and results", "Plan / Stop, paths table, drawing on the slices, log messages"),
         ("export-to-headset.md", "Export to headset", "plan.json, paths.glb, brain model with the app's layers"),

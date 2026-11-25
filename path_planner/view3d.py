@@ -5,6 +5,8 @@ pyqtgraph and PyOpenGL are pure Python; they draw through the system OpenGL driv
 The earlier view used VTK (pyvista), whose unsigned DLLs are blocked by Windows Smart App Control.
 
 Mouse: left drag = rotate, right drag or wheel = zoom, middle drag (or Ctrl + left drag) = move.
+Slice planes: the axial, coronal and sagittal slices shown in the other three views are drawn as almost transparent
+coloured planes with a thin frame (button "Slices" switches them off); they move with the cursor and the sliders.
 """
 import numpy as np
 import pyqtgraph as pg
@@ -34,11 +36,15 @@ class View3D(QtWidgets.QWidget):
         bar = QtWidgets.QHBoxLayout(); bar.setContentsMargins(2, 2, 2, 0)
         lab = QtWidgets.QLabel("3D"); lab.setStyleSheet("color: white; font-weight: bold"); bar.addWidget(lab)
         bar.addStretch(1)
+        self.btn_planes = QtWidgets.QToolButton(); self.btn_planes.setText("Slices"); self.btn_planes.setCheckable(True)
+        self.btn_planes.setChecked(True); self.btn_planes.setToolTip("Show where the three slices of the other views are")
+        self.btn_planes.toggled.connect(self._planes_toggled); bar.addWidget(self.btn_planes)
         for text, view in (("Front", "front"), ("Left", "left"), ("Right", "right"), ("Top", "top")):
             b = QtWidgets.QToolButton(); b.setText(text); b.clicked.connect(lambda _=False, v=view: self.set_view(v)); bar.addWidget(b)
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(2, 2, 2, 2); lay.setSpacing(2)
         lay.addLayout(bar); lay.addWidget(self.gl, 1)
         self.centre, self.size = np.zeros(3), 200.0
+        self._planes = []                                          # last [(name, corners 4 x 3 mm, colour)]
 
     # ------------------------------------------------------------------ items
     def _put(self, name, item):
@@ -74,6 +80,37 @@ class View3D(QtWidgets.QWidget):
         item.setGLOptions(OPAQUE); item.setDepthValue(5)
         self._put(name, item)
 
+    # ------------------------------------------------------------------ slice planes
+    PLANE_FILL, PLANE_FRAME = 0.07, 0.6                           # opacity of the plane and of its frame
+
+    def set_slice_planes(self, planes):
+        """planes: [(name, corners (4 x 3, mm, in order around the plane), colour)]. Updated in place (cheap),
+        so it can be called on every cursor move."""
+        self._planes = planes
+        if not self.btn_planes.isChecked(): return
+        for name, corners, col in planes:
+            c = np.asarray(corners, np.float32)
+            fill, frame = self.items.get("PLANE_" + name), self.items.get("PLANEF_" + name)
+            faces = np.array([[0, 1, 2], [0, 2, 3]], np.uint32)
+            loop = np.vstack([c, c[:1]])
+            if fill is None:
+                fill = gl.GLMeshItem(meshdata=gl.MeshData(vertexes=c, faces=faces), smooth=False, shader=None,
+                                     color=(*col, self.PLANE_FILL), drawEdges=False)
+                fill.setGLOptions(SEE_THROUGH); fill.setDepthValue(15)
+                self._put("PLANE_" + name, fill)
+                frame = gl.GLLinePlotItem(pos=loop, color=(*col, self.PLANE_FRAME), width=1.5, antialias=True,
+                                          mode="line_strip")
+                frame.setGLOptions(SEE_THROUGH); frame.setDepthValue(16)
+                self._put("PLANEF_" + name, frame)
+            else:
+                fill.setMeshData(vertexes=c, faces=faces)
+                frame.setData(pos=loop)
+
+    def _planes_toggled(self, on):
+        if on: self.set_slice_planes(self._planes)
+        else:
+            for name in [n for n in self.items if n.startswith(("PLANE_", "PLANEF_"))]: self.remove(name)
+
     # ------------------------------------------------------------------ camera
     def fit(self, pts):
         """Centre the camera on these points (N x 3 mm)."""
@@ -91,8 +128,8 @@ class View3D(QtWidgets.QWidget):
 def mesh_from_mask(mask, affine_fn, step=1):
     """Marching cubes of a binary mask; step > 1 makes a coarser (lighter) mesh. Returns (verts mm, faces) or None."""
     from scipy import ndimage
-    from skimage import measure
+    import surface
     m = ndimage.zoom(mask.astype(np.float32), 1 / step, order=1) if step > 1 else mask.astype(np.float32)
     if m.max() < 0.5: return None
-    vv, ff, _, _ = measure.marching_cubes(np.pad(m, 1), 0.5)
+    vv, ff = surface.marching_cubes(np.pad(m, 1), 0.5)
     return affine_fn((vv - 1) * step), ff

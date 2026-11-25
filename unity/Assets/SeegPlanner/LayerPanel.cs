@@ -7,6 +7,8 @@
 //   Point the right controller at the panel : a laser shows where you point, the row under it is highlighted
 //   Right trigger on a row : layer / path on or off;  on a group title : the whole group on or off
 //   Right grip while pointing at the panel : drag the panel (it keeps facing you); release = it stays there
+//   MRI slice section: click a thumbnail (sagittal / axial / coronal) = that T1 slice is shown inside the hologram
+//   (click it again or "Off" = hide); then right grip (NOT on the panel) + move the hand = scroll (SliceViewer.cs)
 //
 // While the laser is on the panel the right trigger clicks the panel and does NOT record a landmark.
 // The panel is a world-space uGUI canvas (UI/Default + the built-in font survive a player build); clicks are found
@@ -22,20 +24,27 @@ namespace SeegPlanner
     public class LayerPanel : MonoBehaviour
     {
         public PatientLoader loader;
+        public SliceViewer slices;
         [Tooltip("Width of the panel in metres")]
-        public float panelWidth = 0.42f;
+        public float panelWidth = 0.38f;
         [Tooltip("The laser reaches this far (metres)")]
         public float maxRayLength = 3f;
+        [Tooltip("The head (PatientRoot, origin = head centre). The laser does not reach the panel through the head, and the " +
+                 "panel ignores the controller while it is close to the head, so touching landmarks never clicks the panel.")]
+        public Transform head;
+        public float headRadius = 0.11f, nearHead = 0.22f;
 
         public bool Visible => root != null && root.gameObject.activeSelf;
         /// True while the right controller points at the panel (QuestControls then gives the trigger to the panel).
         public bool Hovering { get; private set; }
+        /// True while the panel is being dragged with the right grip.
+        public bool Dragging => dragging;
 
         // layout in canvas pixels (x right, y down from the top-left corner)
-        const float ColW = 340f, RowH = 36f, Pad = 10f, TitleH = 54f, Swatch = 22f;
+        const float ColW = 340f, RowH = 36f, Pad = 10f, TitleH = 54f, Swatch = 22f, TileH = 210f;
         float W, H;
 
-        enum Kind { Layer, Group, Path, Targets, AllPathsOn, AllPathsOff }
+        enum Kind { Layer, Group, Path, Targets, AllPathsOn, AllPathsOff, SliceOff, SlicePlane }
         class Row
         {
             public Kind kind;
@@ -45,6 +54,7 @@ namespace SeegPlanner
             public Rect rect;                   // top-left pixel rect on the canvas
             public Image bg, swatch; public Text label;
             public Color colour;
+            public SliceViewer.Plane plane;     // SlicePlane rows
         }
         readonly List<Row> rows = new();
         readonly Dictionary<string, List<string>> groupLayers = new();
@@ -61,6 +71,8 @@ namespace SeegPlanner
         static readonly Color GroupBg = new Color(0.2f, 0.2f, 0.24f, 0.95f);
         static readonly Color OffSwatch = new Color(0.25f, 0.25f, 0.25f, 1f);
         static readonly Color OffText = new Color(0.55f, 0.55f, 0.55f, 1f);
+        static readonly Color Selected = new Color(0.15f, 0.45f, 0.25f, 0.95f);
+        Text sliceStatus;
 
         // ---------------------------------------------------------------- build
 
@@ -95,7 +107,8 @@ namespace SeegPlanner
             W = 2 * ColW + 3 * Pad;
             float layersH = Mathf.Max(colRows[0], colRows[1]) * RowH;
             float pathsTop = TitleH + layersH + Pad;
-            H = pathsTop + RowH + pathRows * RowH + Pad;
+            float sliceTop = pathsTop + RowH + Mathf.Max(pathRows, 1) * RowH + Pad;
+            H = sliceTop + RowH + TileH + Pad;
 
             var go = new GameObject("LayerPanel");
             var canvas = go.AddComponent<Canvas>();
@@ -149,6 +162,8 @@ namespace SeegPlanner
             }
             if (paths.Count == 0)
                 MakeText(root, new Rect(Pad, pathsTop + RowH, W - 2 * Pad, RowH - 4), "no paths in plan.json", 18, TextAnchor.MiddleLeft, OffText);
+
+            BuildSliceSection(sliceTop, bw);
 
             laser = MakeBar("LayerPanelLaser", new Color(0.4f, 0.9f, 1f));
             dot = MakeDot("LayerPanelDot", new Color(0.4f, 0.9f, 1f));
@@ -279,6 +294,13 @@ namespace SeegPlanner
             if (Mathf.Abs(denom) < 1e-4f) return false;
             float t = Vector3.Dot(root.position - origin, n) / denom;
             if (t <= 0f || t > maxRayLength) return false;
+            if (head != null)                                            // the (real) head blocks the laser
+            {
+                Vector3 c = head.position;
+                if ((c - origin).magnitude < nearHead) return false;     // controller at the head = touching landmarks
+                float th = Vector3.Dot(c - origin, dir);
+                if (th > 0f && th < t && (c - (origin + dir * th)).magnitude < headRadius) return false;
+            }
             point = origin + dir * t;
             Vector3 local = root.InverseTransformPoint(point);          // canvas units (pixels), origin at the centre
             px = new Vector2(local.x + W / 2f, H / 2f - local.y);
@@ -309,6 +331,13 @@ namespace SeegPlanner
                     foreach (var r in rows)
                         if (r.kind == Kind.Path) foreach (var n in r.nodes) loader.SetLayerVisible(n, hover.kind == Kind.AllPathsOn);
                     break;
+                case Kind.SliceOff:
+                    slices?.SetMode(SliceViewer.Plane.Off);
+                    break;
+                case Kind.SlicePlane:
+                    if (slices != null && slices.Available)
+                        slices.SetMode(slices.Mode == hover.plane ? SliceViewer.Plane.Off : hover.plane);
+                    break;
             }
             Refresh();
             return true;
@@ -326,12 +355,66 @@ namespace SeegPlanner
             if (root == null || !root.gameObject.activeSelf) return;
             foreach (var r in rows)
             {
+                if (r.kind == Kind.SlicePlane || r.kind == Kind.SliceOff) { RefreshSlice(r); continue; }
                 bool on = r.kind == Kind.Group ? GroupOn(r.key) : r.nodes.Count == 0 || AnyOn(r.nodes);
                 if (r.kind == Kind.AllPathsOn || r.kind == Kind.AllPathsOff) on = true;
                 r.bg.color = r == hover ? RowHover : (r.kind == Kind.Group ? GroupBg : RowBg);
                 if (r.swatch != null) r.swatch.color = on ? r.colour : OffSwatch;
                 r.label.color = on ? Color.white : OffText;
             }
+            if (sliceStatus != null)
+            {
+                if (slices == null || !slices.Available) sliceStatus.text = slices != null ? slices.LoadMessage : "slice mode not available";
+                else if (slices.Mode == SliceViewer.Plane.Off) sliceStatus.text = "click a picture = show it in the head";
+                else sliceStatus.text = (slices.Scrolling ? "<b>moving:</b> " : "grip + move: ") + slices.Describe(slices.Mode);
+            }
+        }
+
+        // ---------------------------------------------------------------- MRI slice section
+
+        static readonly SliceViewer.Plane[] TileOrder = { SliceViewer.Plane.Sagittal, SliceViewer.Plane.Axial, SliceViewer.Plane.Coronal };
+
+        void BuildSliceSection(float top, float bw)
+        {
+            MakeText(root, new Rect(Pad, top, bw, RowH - 4), "<b>MRI slice</b>", 20, TextAnchor.MiddleLeft, Color.white);
+            sliceStatus = MakeText(root, new Rect(Pad + bw + 8f, top, 2 * bw + 8f, RowH - 4), "", 15, TextAnchor.MiddleLeft,
+                                   new Color(0.8f, 0.8f, 0.8f));
+            sliceStatus.horizontalOverflow = HorizontalWrapMode.Wrap;
+            AddRow(new Row { kind = Kind.SliceOff, key = "slice_off", rect = new Rect(Pad + 3 * (bw + 8f), top, bw, RowH - 4) },
+                   "Slice off", Color.white);
+            float tileW = (W - 2 * Pad - 2 * 8f) / 3f, y = top + RowH;
+            for (int t = 0; t < 3; t++)
+            {
+                var plane = TileOrder[t];
+                var r = new Row { kind = Kind.SlicePlane, key = plane.ToString(), plane = plane, rect = new Rect(Pad + t * (tileW + 8f), y, tileW, TileH) };
+                r.bg = MakeImage(root, r.rect, RowBg);
+                r.label = MakeText(root, new Rect(r.rect.x + 6f, y + 2f, tileW - 12f, 24f), plane.ToString(), 16, TextAnchor.MiddleCenter, Color.white);
+                var texture = slices != null && slices.Available ? slices.Texture(plane) : null;
+                if (texture != null)
+                {
+                    float aw = tileW - 12f, ah = TileH - 34f;
+                    float k = Mathf.Min(aw / texture.width, ah / texture.height);
+                    float w = texture.width * k, h = texture.height * k;
+                    var img = new GameObject("Thumb").AddComponent<RawImage>();
+                    img.transform.SetParent(root, false);
+                    Place(img.rectTransform, new Rect(r.rect.x + (tileW - w) / 2f, y + 28f + (ah - h) / 2f, w, h));
+                    img.texture = texture;
+                    img.raycastTarget = false;
+                    if (plane == SliceViewer.Plane.Axial) img.uvRect = new Rect(0f, 1f, 1f, -1f);   // anterior up
+                }
+                else MakeText(root, new Rect(r.rect.x + 6f, y + 30f, tileW - 12f, TileH - 40f), "no MRI", 16, TextAnchor.MiddleCenter, OffText);
+                rows.Add(r);
+            }
+        }
+
+        void RefreshSlice(Row r)
+        {
+            bool selected = slices != null && (r.kind == Kind.SlicePlane ? slices.Mode == r.plane : false);
+            r.bg.color = r == hover ? RowHover : selected ? Selected : (r.kind == Kind.SliceOff ? RowBg : RowBg);
+            if (r.kind == Kind.SlicePlane && slices != null && slices.Available)
+                r.label.text = $"{r.plane}  {slices.Index(r.plane) + 1}/{slices.Count(r.plane)}";
+            bool usable = slices != null && slices.Available && (r.kind == Kind.SlicePlane || slices.Mode != SliceViewer.Plane.Off);
+            r.label.color = usable ? Color.white : OffText;
         }
 
         bool GroupOn(string g)

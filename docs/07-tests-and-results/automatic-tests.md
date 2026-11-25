@@ -22,6 +22,7 @@ Synthetic patient: 1 mm grid, head = sphere of radius 48 mm, brain = 40 mm, four
 | 8 | electrode contacts | every 5 mm of arc length from the tip, none in the straight entry; a target 20 mm above the tip is on contact 5 |
 | 9 | target region from an axial and a coronal outline (a box) | the tip is inside the region |
 | 10 | two targets not on one line | one path: straight through the first, then bending onto the second (exact arc start) |
+| 11 | a no-go area (4 mm ball) drawn on a planned path, then planning again | the new path is feasible and keeps the margin from the area; a target inside it is reported; the area is saved as kind "nogo"; deleting it restores the original safety map |
 
 Self-test on a real patient: `python path_planner/app.py --selftest <patient folder>` ([Install and run](../04-planner-app/install-and-run.md)).
 

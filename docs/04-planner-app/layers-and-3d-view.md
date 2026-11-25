@@ -26,5 +26,5 @@ The headset model is built from the same list, see [Export to headset](export-to
 
 <!-- nav:bar -->
 ---
-← [Target regions](target-regions.md) | [↑ Planner app (desktop)](README.md) | [Planning and results](planning-and-results.md) →
+← [No-go areas drawn by the doctor](no-go-areas.md) | [↑ Planner app (desktop)](README.md) | [Planning and results](planning-and-results.md) →
 <!-- /nav:bar -->

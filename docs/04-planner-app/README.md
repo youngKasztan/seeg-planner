@@ -14,9 +14,10 @@ How to use the desktop program "Continuum Path Planner": install and start it, o
 3. [Opening a patient](opening-a-patient.md) - required files, what is computed, files the app writes
 4. [Targets](targets.md) - add, rename, safety check, snap to a safe point
 5. [Target regions](target-regions.md) - drawing outlines, visual hull, saving
-6. [Layers and the 3D view](layers-and-3d-view.md) - layer groups, tags, colours, transparency
-7. [Planning and results](planning-and-results.md) - Plan / Stop, paths table, drawing on the slices, log messages
-8. [Export to headset](export-to-headset.md) - plan.json, paths.glb, brain model with the app's layers
+6. [No-go areas drawn by the doctor](no-go-areas.md) - mark a place the paths must avoid, then re-plan
+7. [Layers and the 3D view](layers-and-3d-view.md) - layer groups, tags, colours, transparency
+8. [Planning and results](planning-and-results.md) - Plan / Stop, paths table, drawing on the slices, log messages
+9. [Export to headset](export-to-headset.md) - plan.json, paths.glb, brain model with the app's layers
 <!-- /nav:pages -->
 
 <!-- nav:bar -->

@@ -44,6 +44,7 @@ flowchart TD
 | opening a patient | load and resample scans | [Loading the patient](loading-the-patient.md) | `patient.Patient` |
 | opening a patient | safety maps | [Safety maps](safety-maps.md) | `Patient.build_fields` |
 | opening a patient | cost grid, skin entry points | [Route grid and entry points](route-grid-and-entry-points.md) | `Planner.__init__` |
+| Plan paths (only if changed) | drawn no-go areas added to the safety maps, cost grid rebuilt | [Safety maps](safety-maps.md#no-go-areas-drawn-by-the-doctor) | `Patient.set_user_nogo`, `Planner.refresh_fields` |
 | Plan paths | region tips, target check | [Targets check and region tips](targets-check-and-region-tips.md) | `Planner.region_tip`, `check_target` |
 | Plan paths | list of groups (made before the single paths, planned after them) | [Several targets on one path](several-targets-on-one-path.md) | `_candidate_groups` |
 | Plan paths | every target alone: route, starts, fit | [Planning one path](planning-one-path.md) | `plan_sequence`, `_optimise` |

@@ -20,6 +20,8 @@
 | `time_limit_s` | 240 | after this many seconds no more groups are tried; every target alone is always planned (code default 120 if missing) | more groups tried, longer planning |
 | `entry_candidates` | 3 | Dijkstra entry points tried per path | more starts: better paths, slower |
 | `optimizer_iterations` | 150 | x 8 = max. function evaluations per optimisation stage (1200) | more thorough, slower |
+| `user_nogo_margin_mm` | 1.0 | gap the robot surface keeps from a [no-go area drawn in the app](../04-planner-app/no-go-areas.md) | paths stay further from drawn areas |
+| `user_nogo_slab_mm` | 5.0 | half-thickness of a drawn no-go area that has an outline in one view only | thicker single-view areas |
 | `curvature_weight` | 0.1 | weight of the bending cost (code default 0.5 if missing) | straighter, wider arcs preferred |
 
 How these values are used step by step: [Path planning](../05-path-planning/README.md).

@@ -70,7 +70,8 @@ namespace SeegPlanner
         }
 
         static readonly string[] PackageFiles =
-            { "headset_manifest.json", "patient_scene.glb", "patient_scene_lite.glb", "paths.glb", "plan.json" };
+            { "headset_manifest.json", "patient_scene.glb", "patient_scene_lite.glb", "paths.glb", "plan.json",
+              "mri_volume.json", "mri_volume.bytes" };                          // MRI slice mode (SliceViewer)
 
         /// Headset app: copy the patient files built into the app (Assets/StreamingAssets/patient/) to a normal
         /// folder at every start, so no adb is needed and a new build always shows the newly exported plan.

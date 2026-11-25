@@ -44,6 +44,7 @@ Planning safe curved paths for a concentric-tube continuum robot carrying an SEE
 - [Opening a patient](04-planner-app/opening-a-patient.md) - required files, what is computed, files the app writes
 - [Targets](04-planner-app/targets.md) - add, rename, safety check, snap to a safe point
 - [Target regions](04-planner-app/target-regions.md) - drawing outlines, visual hull, saving
+- [No-go areas drawn by the doctor](04-planner-app/no-go-areas.md) - mark a place the paths must avoid, then re-plan
 - [Layers and the 3D view](04-planner-app/layers-and-3d-view.md) - layer groups, tags, colours, transparency
 - [Planning and results](04-planner-app/planning-and-results.md) - Plan / Stop, paths table, drawing on the slices, log messages
 - [Export to headset](04-planner-app/export-to-headset.md) - plan.json, paths.glb, brain model with the app's layers
@@ -70,7 +71,7 @@ Planning safe curved paths for a concentric-tube continuum robot carrying an SEE
 - [Running on the Quest](06-headset-and-unity/running-on-the-quest.md) - Meta Horizon Link, Android build, logs
 - [Controls and help panel](06-headset-and-unity/controls-and-help-panel.md) - controller buttons, pen tip, panel
 - [Landmark registration](06-headset-and-unity/landmark-registration.md) - procedure, Horn / Kabsch maths, FRE, ICP
-- [QR head tracking](06-headset-and-unity/qr-head-tracking.md) - following the head, markers, settings, current status
+- [Head tracking with markers](06-headset-and-unity/qr-head-tracking.md) - following the head, AprilTag camera source, markers, settings
 - [Troubleshooting](06-headset-and-unity/troubleshooting.md) - pink model, no marker provider, other problems
 
 ### 7. [Tests and results](07-tests-and-results/README.md)

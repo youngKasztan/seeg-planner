@@ -4,7 +4,7 @@ app.py - Continuum robot path planner (desktop app, Windows/Linux/macOS).
   1. Open patient folder   (output of pipeline/run_pipeline.py, e.g. dataMedical/IXI057/results)
   2. Scroll through the slices (mouse wheel), LEFT click = add a target, RIGHT click = move the cursor
   3. Plan paths            (robot constraints and no-go zones: robot.toml next to the program)
-  4. Export to headset     (plan.json + paths.glb into the patient's headset folder)
+  4. Export to headset     (plan.json + paths.glb + brain model + MRI slice volume into the patient's headset folder)
 
 Run:  python path_planner/app.py [patient_folder]
 Self-test without a window:  python path_planner/app.py --selftest patient_folder
@@ -54,6 +54,7 @@ class SliceView(QtWidgets.QWidget):
     """One slice orientation. axis 2 = axial, 1 = coronal, 0 = sagittal (array is RAS)."""
     clicked = QtCore.Signal(int, object, bool)        # axis, voxel index (3,), add_target?
     TITLES = {2: "Axial", 1: "Coronal", 0: "Sagittal"}
+    COLOURS = {2: (0.35, 0.65, 1.0), 1: (0.4, 0.95, 0.45), 0: (1.0, 0.55, 0.8)}   # also the plane colours in 3D
 
     def __init__(self, axis, parent=None):
         super().__init__(parent)
@@ -61,7 +62,8 @@ class SliceView(QtWidgets.QWidget):
         self.fig = Figure(figsize=(4, 4), facecolor="black"); self.canvas = FigureCanvasQTAgg(self.fig)
         self.ax = self.fig.add_axes([0, 0, 1, 1]); self.ax.set_facecolor("black"); self.ax.axis("off")
         self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.label = QtWidgets.QLabel(self.TITLES[axis]); self.label.setStyleSheet("color: white; font-weight: bold")
+        self.label = QtWidgets.QLabel(self.TITLES[axis])
+        self.label.setStyleSheet("color: #%02x%02x%02x; font-weight: bold" % tuple(int(255 * c) for c in self.COLOURS[axis]))
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(2, 2, 2, 2); lay.setSpacing(2)
         top = QtWidgets.QHBoxLayout(); top.addWidget(self.label); top.addWidget(self.slider, 1); lay.addLayout(top)
         lay.addWidget(self.canvas, 1)
@@ -137,7 +139,9 @@ class SliceView(QtWidgets.QWidget):
                 vt = r.outlines[self.axis][1]
                 self.artists += self.ax.plot(np.r_[vt[:, 0], vt[:1, 0]], np.r_[vt[:, 1], vt[:1, 1]], color=r.colour, lw=1.5)
         u, v, _ = self.uv(a.cursor)
-        self.artists += [self.ax.axvline(u[0], color="#2a6", lw=0.6, alpha=0.6), self.ax.axhline(v[0], color="#2a6", lw=0.6, alpha=0.6)]
+        du, dv = [d for d in range(3) if d != self.axis]          # cursor lines = the other two slices, in their colours
+        self.artists += [self.ax.axvline(u[0], color=self.COLOURS[du], lw=0.8, alpha=0.7),
+                         self.ax.axhline(v[0], color=self.COLOURS[dv], lw=0.8, alpha=0.7)]
         if a.chk_paths.isChecked():
             for i, r in enumerate(a.paths):
                 ijk = p.mm_to_vox(r.points); pu, pv, d = self.uv(ijk); col = PATH_COLOURS[i % len(PATH_COLOURS)]
@@ -185,7 +189,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, folder=None):
         super().__init__()
         self.setWindowTitle(APP_NAME); self.resize(1500, 950)
-        self.cfg = config.load(); self.patient = self.planner = None
+        self.cfg = config.load(); self.patient = self.planner = None; self._nogo_key = None
         self.targets, self.paths, self.uncovered, self.cursor = {}, [], [], np.zeros(3, int)
         self.regions, self.region_tips = {}, {}                    # name -> regions.Region; name -> tip chosen by the planner
         self.layer_items, self.layer_meshes = {}, {}               # key -> (tree item, mask getter, colour, alpha)
@@ -229,7 +233,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for text, fn in (("Delete", self.delete_target), ("Snap to safe point", self.snap_target), ("Clear all", self.clear_targets)):
             b = QtWidgets.QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
         sl.addLayout(row)
-        sl.addWidget(QtWidgets.QLabel("<b>Target regions</b>  (the robot tip goes anywhere inside; double click to rename)"))
+        sl.addWidget(QtWidgets.QLabel("<b>Target regions and no-go areas</b>  (tip anywhere inside a region; "
+                                      "paths stay out of red no-go areas; double click to rename)"))
         self.reglist = QtWidgets.QListWidget(); self.reglist.setMaximumHeight(80)
         self.reglist.itemDoubleClicked.connect(self.rename_region)
         self.reglist.currentRowChanged.connect(self.goto_region); sl.addWidget(self.reglist)
@@ -239,11 +244,17 @@ class MainWindow(QtWidgets.QMainWindow):
                                  "Then draw it on a slice of a second view (e.g. axial, then coronal):\n"
                                  "the region is where the outlines overlap. Drawing again in a view replaces it.")
         self.btn_draw.toggled.connect(self.toggle_draw); row.addWidget(self.btn_draw)
-        for text, fn in (("New region", self.new_region), ("Delete region", self.delete_region)):
+        for text, fn in (("New region", lambda: self.new_region("target")), ("Delete", self.delete_region)):
             b = QtWidgets.QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
         sl.addLayout(row)
-        self.chk_clip = QtWidgets.QCheckBox("Region only inside the brain"); self.chk_clip.setChecked(True)
-        self.chk_clip.toggled.connect(self._rebuild_regions); sl.addWidget(self.chk_clip)
+        row = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton("New no-go area"); b.clicked.connect(lambda: self.new_region("nogo"))
+        b.setToolTip("Mark a place the paths must avoid (e.g. a part of a planned path you do not like):\n"
+                     "draw its outline like a region, then press 'Plan paths' again - new paths go around it.")
+        row.addWidget(b)
+        self.chk_clip = QtWidgets.QCheckBox("Target regions only inside the brain"); self.chk_clip.setChecked(True)
+        self.chk_clip.toggled.connect(self._rebuild_regions); row.addWidget(self.chk_clip)
+        sl.addLayout(row)
         sl.addWidget(QtWidgets.QLabel("<b>Layers</b>  (tick to show on the slices and in 3D)"))
         self.ltree = QtWidgets.QTreeWidget(); self.ltree.setHeaderHidden(True)
         self.ltree.itemChanged.connect(self._layer_toggled); sl.addWidget(self.ltree, 5)
@@ -343,6 +354,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _loaded(self, res):
         self.patient, self.planner = res
+        self._nogo_key = None                                      # fresh safety maps: drawn no-go areas not added yet
         p = self.patient
         lo, hi = np.percentile(p.t1[p.head], [1, 99.5])
         self.t1n = np.clip((p.t1 - lo) / (hi - lo), 0, 1).astype(np.float32)
@@ -350,6 +362,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for v in self.views: v.img = None; v.setup(p.shape)
         for w in p.warnings: self._log("WARNING: " + w)
         self._log(f"Patient loaded: {os.path.basename(p.folder.rstrip('/'))}; no-go zones: {', '.join(p.zone_masks)}")
+        import grid_paths, surface
+        self._log(f"  route search: Dijkstra via {grid_paths.BACKEND}; 3D surfaces: {surface.BACKEND}")
         self.bar.setValue(1000); self.status.showMessage("Left click on a slice to add a target")
         if getattr(self, "_targets_folder", None) != p.folder:     # another patient: start from its own targets
             self.targets, self.paths, self.region_tips = {}, [], {}
@@ -512,13 +526,19 @@ class MainWindow(QtWidgets.QMainWindow):
         while f"{base}{n}" in self.regions or f"{base}{n}" in self.targets: n += 1
         return f"{base}{n}"
 
-    def new_region(self):
+    def new_region(self, kind="target"):
         if self.patient is None: return None
-        name = self._unique("R")
-        self.regions[name] = regions.Region(name, regions.COLOURS[(len(self.regions)) % len(regions.COLOURS)])
+        if kind == "nogo":
+            name = self._unique("N")
+            self.regions[name] = regions.Region(name, regions.NOGO_COLOUR, "nogo")
+        else:
+            name = self._unique("R")
+            ntarget = sum(not r.is_nogo for r in self.regions.values())
+            self.regions[name] = regions.Region(name, regions.COLOURS[ntarget % len(regions.COLOURS)])
         self._refresh_regions(select=name)
         if not self.btn_draw.isChecked(): self.btn_draw.setChecked(True)
-        self._log(f"{name}: draw its outline on a slice, then on a slice of another view")
+        what = "no-go area" if kind == "nogo" else "target region"
+        self._log(f"{name} ({what}): draw its outline on a slice, then on a slice of another view")
         return name
 
     def toggle_draw(self, on):
@@ -537,11 +557,34 @@ class MainWindow(QtWidgets.QMainWindow):
         if r.mask is not None and r.mask.any():                    # other views jump to the region
             c = np.round(np.argwhere(r.mask).mean(0)).astype(int); c[axis] = k; self.cursor = c
         self._log(f"{name}: outline in the {regions.VIEW_NAMES[axis]} view, {r.volume_ml(self.patient.vox):.1f} ml{hint}")
+        if r.is_nogo: self._report_nogo_crossings(r)
         self._refresh_regions(select=name); self._update_3d_regions(); self._save_regions(); self.redraw()
 
     def _build_region(self, r):
         p = self.patient
-        r.build(p.shape, p.vox, clip=p.brain if self.chk_clip.isChecked() else None)
+        if r.is_nogo:                                               # no-go: anywhere in the head, thicker single slab
+            r.build(p.shape, p.vox, clip=p.head, slab_mm=self.cfg["planning"].get("user_nogo_slab_mm", 5.0))
+        else:
+            r.build(p.shape, p.vox, clip=p.brain if self.chk_clip.isChecked() else None)
+
+    def nogo_areas(self):
+        """{name: mask} of the no-go areas drawn by the doctor."""
+        return {n: r.mask for n, r in self.regions.items() if r.is_nogo and r.mask is not None and r.mask.any()}
+
+    def _report_nogo_crossings(self, r):
+        """Tell which of the current paths pass through a no-go area that was just drawn."""
+        if r.mask is None or not r.mask.any() or not self.paths: return
+        p, hit = self.patient, []
+        for i, path in enumerate(self.paths):
+            pts = np.asarray(path.points, float)
+            seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)        # densify to ~0.5 mm so no voxel is skipped
+            dense = np.concatenate([np.linspace(a, b, max(int(l / 0.5), 1), endpoint=False) for a, b, l in
+                                    zip(pts[:-1], pts[1:], seg)] + [pts[-1:]])
+            ijk = np.round(p.mm_to_vox(dense)).astype(int)
+            ok = np.all((ijk >= 0) & (ijk < np.array(p.shape)), axis=1)
+            if r.mask[tuple(ijk[ok].T)].any(): hit.append(f"P{i + 1}")
+        if hit: self._log(f"{r.name}: {', '.join(hit)} pass(es) through this no-go area - press 'Plan paths' to re-plan")
+        else: self._log(f"{r.name}: no current path passes through it (it still applies to the next planning)")
 
     def _rebuild_regions(self):
         if self.patient is None: return
@@ -553,7 +596,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reglist.blockSignals(True); self.reglist.clear()
         for n, r in self.regions.items():
             tip = "  tip chosen" if n in self.region_tips else ""
-            it = QtWidgets.QListWidgetItem(f"{n}: {r.volume_ml(self.patient.vox):.1f} ml  ({r.views()}){tip}")
+            kind = "[NO-GO] " if r.is_nogo else ""
+            it = QtWidgets.QListWidgetItem(f"{kind}{n}: {r.volume_ml(self.patient.vox):.1f} ml  ({r.views()}){tip}")
             it.setData(QtCore.Qt.UserRole, n); it.setForeground(QtGui.QColor.fromRgbF(*r.colour))
             self.reglist.addItem(it)
             if n == select: self.reglist.setCurrentItem(it)
@@ -647,8 +691,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ------------------------------------------------------------------ planning
     def plan(self):
-        regs = {n: r.mask for n, r in self.regions.items() if r.mask is not None and r.mask.any()}
+        regs = {n: r.mask for n, r in self.regions.items() if not r.is_nogo and r.mask is not None and r.mask.any()}
         if not (self.planner and (self.targets or regs)): self._log("open a patient and add targets or regions first"); return
+        nogo, margin = self.nogo_areas(), self.cfg["planning"].get("user_nogo_margin_mm", 1.0)
+        nogo_key = (margin, tuple(sorted((n, hash(np.packbits(m).tobytes())) for n, m in nogo.items())))
         if self.busy(): self._log("busy - wait for the current task or press Stop"); return
         targets, pl = {k: np.array(v, float) for k, v in self.targets.items()}, self.planner
         pl.robot, pl.pl = self.cfg["robot"], self.cfg["planning"]; pl.cfg = self.cfg
@@ -659,6 +705,12 @@ class MainWindow(QtWidgets.QMainWindow):
             pl.log, pl.progress = log, progress
             pl.should_stop = lambda: self.worker.stop_requested
             try:
+                if nogo_key != self._nogo_key:                      # 0. no-go areas drawn by the doctor
+                    progress(0.0, "adding the drawn no-go areas to the safety maps")
+                    self.patient.set_user_nogo(nogo, margin, log=log)
+                    pl.refresh_fields()
+                    self._nogo_key = nogo_key
+                    if nogo: log(f"  {len(nogo)} drawn no-go area(s) added to the no-go zones")
                 tips = {}
                 for rn, mask in regs.items():                        # 1. a tip anywhere inside every region
                     progress(0.0, f"choosing the best point in region {rn}")
@@ -714,9 +766,10 @@ class MainWindow(QtWidgets.QMainWindow):
             origin = ("prior" if ("prior" in name or "prior" in files) else "atlas function" if "eloquent" in name
                       else "estimate" if name == "skull_t1" else "patient")
             out.append((name, group, m, tuple(col), kind == "nogo", origin))
-        for n, r in self.regions.items():                           # target regions drawn by the doctor
+        for n, r in self.regions.items():                           # target regions and no-go areas drawn by the doctor
             if r.mask is not None and r.mask.any():
-                out.append((f"region_{n}", "Target regions", r.mask, tuple(r.colour), True, "drawn by the doctor"))
+                if r.is_nogo: out.append((f"nogo_{n}", "No-go zones", r.mask, tuple(r.colour), True, "drawn by the doctor"))
+                else: out.append((f"region_{n}", "Target regions", r.mask, tuple(r.colour), True, "drawn by the doctor"))
         return out
 
     def export(self):
@@ -737,10 +790,13 @@ class MainWindow(QtWidgets.QMainWindow):
             path = export.export(p.headset_dir, paths, targets, cfg, centre, uncovered, problems)
             progress(0.3, "building the brain model for the headset")
             headset_scene.export_scene(p.headset_dir, p, layers, log=log)
+            progress(0.9, "writing the MRI for the headset's slice mode")
+            import mri_volume
+            mri_volume.export(p.headset_dir, p.t1, p.affine, p.head, centre, log=log)
             progress(1.0, "export done")
             return path
         self._run(job, lambda path: self._log(f"Exported to {os.path.dirname(path)}: plan.json, paths.glb, "
-                                              f"patient_scene.glb (same layers as here) - press Play in Unity"))
+                                              f"patient_scene.glb (same layers as here), mri_volume (slice mode) - press Play in Unity"))
 
     # ------------------------------------------------------------------ drawing
     def set_cursor(self, c):
@@ -748,6 +804,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def redraw(self):
         for v in self.views: v.redraw()
+        self._update_3d_planes()
+
+    def _update_3d_planes(self):
+        """The three slices of the other views as almost transparent planes in the 3D view (they follow the cursor)."""
+        if self.view3d is None or self.patient is None: return
+        n = np.array(self.patient.shape) - 1
+        planes = []
+        for axis in (2, 1, 0):
+            u, w = [d for d in range(3) if d != axis]
+            corners = np.zeros((4, 3))
+            corners[:, axis] = self.cursor[axis]
+            corners[:, u] = [0, n[u], n[u], 0]
+            corners[:, w] = [0, 0, n[w], n[w]]
+            planes.append((SliceView.TITLES[axis].lower(), self.patient.vox_to_mm(corners), SliceView.COLOURS[axis]))
+        self.view3d.set_slice_planes(planes)
 
     def _mesh(self, mask, step):
         from view3d import mesh_from_mask
@@ -760,7 +831,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if b is not None:
             v3.add_mesh("brain", *b, (0.85, 0.7, 0.7), 0.12); v3.fit(b[0])
         for key in self.layer_items: self._update_3d_layer(key)
-        self._update_3d_targets(); self._update_3d_paths(); self._update_3d_regions()
+        self._update_3d_targets(); self._update_3d_paths(); self._update_3d_regions(); self._update_3d_planes()
 
     def _update_3d_layer(self, key):
         if self.view3d is None or self.patient is None: return
